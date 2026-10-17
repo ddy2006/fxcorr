@@ -177,7 +177,13 @@ if exp.endswith('.difx'):
 nsub = int(bj['n_subints'])
 subint = int(bj['subint_ns'])
 inttime = float(bj['integration_sec'])
-initsec = (bj['start_mjd'] - mjd0 - sec0 / 86400.0) * 86400.0
+# 批级（route=3 grain=batch）用 FXCORR_BENCH_START_MJD 覆盖 .input 的 START：
+# 此时 initsec 相对"被覆盖后的 START"计算（= 0 附近，R10 由模块保证软链同步）。
+start_override = os.environ.get('FXCORR_BENCH_START_MJD', '').strip()
+if start_override:
+    initsec = (bj['start_mjd'] - float(start_override)) * 86400.0
+else:
+    initsec = (bj['start_mjd'] - mjd0 - sec0 / 86400.0) * 86400.0
 batchdur = nsub * subint / 1.0e9
 nint = round(batchdur / inttime)
 if abs(nint * inttime - batchdur) > 1e-6:
@@ -258,11 +264,22 @@ for line in open(sys.argv[1]):
         break
 " "$WORKDIR/$CFGIN")
 CALCBASE=$(basename "$CALCIN")
-sed -e "s|^EXECUTE TIME (SEC):[[:space:]]*[0-9]*$|EXECUTE TIME (SEC): $EXEC|" \
+# 批级 START 覆盖（FXCORR_BENCH_START_MJD 非空；缺省空 = 原行为）
+SMJD=""
+SSEC=""
+if [ -n "${FXCORR_BENCH_START_MJD:-}" ]; then
+	read -r SMJD SSEC < <(awk -v m="$FXCORR_BENCH_START_MJD" \
+		'BEGIN{ i=int(m); printf "%d %.6f\n", i, (m-i)*86400.0 }')
+fi
+SEDARGS=(-e "s|^EXECUTE TIME (SEC):[[:space:]]*[0-9]*$|EXECUTE TIME (SEC): $EXEC|" \
     -e "s|^OUTPUT FILENAME:[[:space:]]*.*$|OUTPUT FILENAME:    $OUTDIR|" \
     -e "s|^CALC FILENAME:[[:space:]]*.*$|CALC FILENAME:      $WORKDIR/bench/$CALCBASE|" \
-    -e "s|^\(FILE [0-9]*/[0-9]*:[[:space:]]*\)\([^/[:space:]].*\)$|\1$FXCORR_ROOT_RAW/\2|" \
-    "$WORKDIR/$CFGIN" > "$WORKDIR/bench/$(basename "$CFGIN")"
+    -e "s|^\(FILE [0-9]*/[0-9]*:[[:space:]]*\)\([^/[:space:]].*\)$|\1$FXCORR_ROOT_RAW/\2|")
+if [ -n "$SMJD" ]; then
+	SEDARGS+=(-e "s|^START MJD:[[:space:]]*.*\$|START MJD:          $SMJD|" \
+	          -e "s|^START SECONDS:[[:space:]]*.*\$|START SECONDS:      $SSEC|")
+fi
+sed "${SEDARGS[@]}" "$WORKDIR/$CFGIN" > "$WORKDIR/bench/$(basename "$CFGIN")"
 # 捕获组用 `[^/[:space:]]` 而不是 `[^/]`：BRE 的 `[[:space:]]*` 会**回溯**——当值本来是
 # 绝对路径（`/work2/...`）时，`[[:space:]]*` 少匹配一个空格、让 `[^/]` 去吃那个空格，
 # 于是"相对路径才拼 $CFGDIR"的意图失效，拼成 `$CFGDIR/ /work2/...`（中间一个空格），
@@ -408,17 +425,40 @@ trap 'rm -f "${OUT:-}"; if [ -n "${SAMPID:-}" ]; then kill "$SAMPID" 2>/dev/null
 NNODES=${SLURM_JOB_NUM_NODES:-1}
 if [ "$NNODES" -gt 1 ] && command -v srun >/dev/null 2>&1; then
 	srun --nodes="$NNODES" --ntasks-per-node=1 --overlap \
-		python3 "$SCRIPTDIR/mpi_sampler.py" "$SAMPLEDIR" &
+		nice -n -5 python3 "$SCRIPTDIR/mpi_sampler.py" "$SAMPLEDIR" &
 	echo "run_bench.sh: sampler dispatched to $NNODES node(s) via srun" >&2
 else
-	python3 "$SCRIPTDIR/mpi_sampler.py" "$SAMPLEDIR" &
+	# nice -5（容器内 root 可降）：34 rank / 30 核超订时，采样器（0.2 s 轮询）
+	# 会被 CPU 饿死到 mpirun 结束才拿到首个快照——first_seen 失真（2026-10-17 实测
+	# route=3：mpi_init=101.35 s = 全程）。降 nice 后恢复可测。
+	nice -n -5 python3 "$SCRIPTDIR/mpi_sampler.py" "$SAMPLEDIR" &
 fi
 SAMPID=$!
 
-mpirun "${MPIARGS[@]}" -np "${NP:-4}" mpifxcorr "bench/$(basename "$CFGIN")"
+# ---- 可选打点（FXCORR_BENCH_EPOCH_FILE 非空；route=3 冷启动量化用）----
+# 只写 epoch 行（`<key>,<epoch>`，追加）；env 为空时零行为（不影响既有口径）。
+# mpirun 失败时 set -e 直接退出，mpirun_end 缺失可作失败标志。
+epoch_mark() {
+	# $1=key；$2=显式 epoch（缺省取当前时刻）——sampler 的 first/last seen 必须
+	# 传采样值本身（2026-10-17 踩过：只传 key 时写成了"解析时刻"= mpirun 结束后，
+	# 误判 sampler 失效）
+	[ -n "${FXCORR_BENCH_EPOCH_FILE:-}" ] || return 0
+	local t=${2:-$(date +%s.%N)}
+	printf '%s,%s\n' "$1" "$t" >> "$FXCORR_BENCH_EPOCH_FILE" 2>/dev/null || true
+}
+epoch_mark mpirun_start
+# FXCORR_MPI_TARGET：mpirun 的目标（缺省 mpifxcorr；route=3 用 rank wrapper
+# 记录各 rank 进程启动时刻——rank 自身有 CPU 份额，不受采样器被 throttle 影响）
+mpirun "${MPIARGS[@]}" -np "${NP:-4}" "${FXCORR_MPI_TARGET:-mpifxcorr}" "bench/$(basename "$CFGIN")"
+epoch_mark mpirun_end
 
 kill "$SAMPID" 2>/dev/null || true
 wait "$SAMPID" 2>/dev/null || true
+# 诊断：保留采样文件（FXCORR_BENCH_KEEP_SAMPLES 给目录）
+if [ -n "${FXCORR_BENCH_KEEP_SAMPLES:-}" ]; then
+	mkdir -p "$FXCORR_BENCH_KEEP_SAMPLES"
+	cp -a "$SAMPLEDIR"/*.txt "$FXCORR_BENCH_KEEP_SAMPLES"/ 2>/dev/null || true
+fi
 
 # 汇总：每节点一行 + 合计。**别只看启动节点**——P4 那份内联采集器的盲区就在这儿。
 SAMPLES=("$SAMPLEDIR"/*.txt)
@@ -426,6 +466,7 @@ if [ -s "${SAMPLES[0]:-/nonexistent}" ]; then
 	TOT_NRANK=0 TOT_RSS=0 TOT_HWM=0 TOT_RX=0 TOT_TX=0
 	for f in "${SAMPLES[@]}"; do
 		HOST= PEAK_PROC_MB=0 PEAK_SUM_RSS_MB=0 SUM_HWM_MB=0 NRANK=0 NET_RX_MB=0 NET_TX_MB=0
+		first_seen= last_seen=
 		while IFS='=' read -r k v; do
 			case "$k" in
 				HOST)            HOST=$v ;;
@@ -435,10 +476,15 @@ if [ -s "${SAMPLES[0]:-/nonexistent}" ]; then
 				NRANK)           NRANK=$v ;;
 				NET_RX_MB)       NET_RX_MB=$v ;;
 				NET_TX_MB)       NET_TX_MB=$v ;;
+				FIRST_SEEN)      first_seen=$v ;;
+				LAST_SEEN)       last_seen=$v ;;
 			esac
 		done < "$f"
+		[ -n "${first_seen:-}" ] && epoch_mark "mpifxcorr_first_seen_${HOST}" "$first_seen"
+		[ -n "${last_seen:-}" ] && epoch_mark "mpifxcorr_last_seen_${HOST}" "$last_seen"
 		echo "run_bench.sh: $HOST: $NRANK rank(s), single rank $PEAK_PROC_MB MB," \
-		     "concurrent sum $PEAK_SUM_RSS_MB MB, net rx $NET_RX_MB MB / tx $NET_TX_MB MB"
+		     "concurrent sum $PEAK_SUM_RSS_MB MB, net rx $NET_RX_MB MB / tx $NET_TX_MB MB" \
+		     "first_seen=${first_seen:-?} last_seen=${last_seen:-?}"
 		TOT_NRANK=$((TOT_NRANK + NRANK))
 		TOT_RSS=$((TOT_RSS + PEAK_SUM_RSS_MB))
 		TOT_HWM=$((TOT_HWM + SUM_HWM_MB))

@@ -34,6 +34,8 @@ import time
 outdir = sys.argv[1] if len(sys.argv) > 1 else '.'
 host = socket.gethostname()
 out = os.path.join(outdir, host + '.txt')
+# 进程名覆盖（缺省 mpifxcorr；诊断用，如 FXCORR_SAMPLER_PROC=sleep）
+PROC_NAME = os.environ.get('FXCORR_SAMPLER_PROC', 'mpifxcorr')
 
 # 采样的轮询间隔：P4 用 0.2 s 跑 13 分钟的作业，抓得住峰值
 INTERVAL = 0.2
@@ -63,7 +65,7 @@ def snapshot():
 		# Name 是 /proc/<pid>/status 的**第一个**字段，所以比首行就行。P4 时这行曾经
 		# 写成 '\nName:\tmpifxcorr\n'——以为它前面还有别的字段，于是永远匹配不上：采样器
 		# 一路空转到 6 小时兜底，外面看起来就是"卡住不返回"（实测踩过）。
-		if st.split('\n', 1)[0] != 'Name:\tmpifxcorr':
+		if st.split('\n', 1)[0] != 'Name:\t' + PROC_NAME:
 			continue
 		hwm = rss = 0
 		for line in st.splitlines():
@@ -127,6 +129,9 @@ def net_delta(a, b):
 peak_proc = peak_sum_rss = peak_sum_hwm = nrank = 0
 started = False
 net0 = net1 = None
+# 打点（route=3 冷启动量化）：mpifxcorr 进程首次出现 / 最后消失的时刻（epoch 秒）。
+# 与 run_bench.sh 的 mpirun_start/end 联用 → MPI 建链 = first_seen − mpirun_start。
+first_seen = last_seen = None
 
 
 def report():
@@ -137,6 +142,8 @@ def report():
 		'PEAK_SUM_RSS_MB=%d' % (peak_sum_rss // 1024),
 		'SUM_HWM_MB=%d' % (peak_sum_hwm // 1024),
 		'NRANK=%d' % nrank,
+		'FIRST_SEEN=%.3f' % (first_seen or 0),
+		'LAST_SEEN=%.3f' % (last_seen or 0),
 	]
 	d = net_delta(net0, net1) if (net0 is not None and net1 is not None) else {}
 	tot_rx = sum(v[0] for v in d.values())
@@ -152,12 +159,14 @@ def report():
 
 
 def bail(signum, frame):
-	global net1
+	global net1, last_seen
 	# 终点快照在这里**补记**：net1 原本只在"检测到 mpifxcorr 消失"那一刻记，而
 	# run_bench.sh 在 mpirun 返回后**立刻** kill，两个事件几乎同时、谁先到不一定。
 	# 不补记的话被 kill 的那一侧**网络数恒为 0**——2026-09-30 实测：主机报 rx/tx 0、
 	# 远端报 1089 MB，同一份流量的两端对不上（内存数不受影响，它在循环里就采到了）。
 	if started and net1 is None:
+		if last_seen is None:
+			last_seen = time.time()
 		net1 = net_snapshot()
 	report()
 	sys.exit(0)
@@ -171,11 +180,20 @@ signal.signal(signal.SIGTERM, bail)
 signal.signal(signal.SIGINT, bail)
 
 t0 = time.time()
+# 调试（FXCORR_SAMPLER_DEBUG 非空）：每 25 次循环（~5 s）向 stderr 打一行
+DBG = os.environ.get('FXCORR_SAMPLER_DEBUG', '') != ''
+it = 0
 while time.time() - t0 < DEADLINE:
 	procs = snapshot()
+	it += 1
+	if DBG and it % 25 == 0:
+		sys.stderr.write('sampler-dbg: t=%.1f nproc=%d matched=%d started=%s\n' % (
+			time.time() - t0, len(os.listdir('/proc')), len(procs), started))
+		sys.stderr.flush()
 	if procs:
 		if not started:
 			started = True
+			first_seen = time.time()
 			# 基线取"mpifxcorr 出现"这一刻，不是采样器启动那一刻——srun 分发有启动
 			# 延迟，用后者会把 mpirun 启动前的等待算进流量窗口
 			net0 = net_snapshot()
@@ -188,6 +206,7 @@ while time.time() - t0 < DEADLINE:
 		peak_sum_hwm = max(peak_sum_hwm, sum(p[0] for p in procs))
 		nrank = max(nrank, len(procs))
 	elif started:
+		last_seen = time.time()
 		net1 = net_snapshot()
 		break
 	elif time.time() - t0 > WAIT_START:
