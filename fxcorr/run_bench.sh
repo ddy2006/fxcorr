@@ -133,7 +133,10 @@ def softlink_bid():
             return bid
     return None
 
-bid = softlink_bid()
+# 显式批号（批级多节点：FILE 行是真实路径、无软链可解析——softlink_bid 会失效并
+# fallback 到"最新 batch.json"，导致 EXECUTE TIME 按错批计算（2026-10-18 实测
+# 批 4 得 EXECUTE TIME=0、mpifxcorr 0.3 s 空跑））。
+bid = os.environ.get('FXCORR_BENCH_BATCH') or softlink_bid()
 if bid is None:
     jsons = sorted(glob.glob(os.path.join(batchdir, '*.json')), key=os.path.getmtime)
     if not jsons:
@@ -245,6 +248,14 @@ while read -r line; do
 	esac
 done < "$OUT"
 [ -n "$BID" ] || { echo "run_bench.sh: failed to locate a batch" >&2; exit 2; }
+# 输出目录覆盖（2026-10-18）：多节点批级并行时每个批任务必须用独立目录，否则
+# 两个节点同时 rm -rf/重建 bench/<exp>.difx 会互相踩（实测批 2 写失败）。
+# 空 = 原行为（bench/<exp>.difx）。
+# 自定义 .input（批级多节点：每批独立副本，避免共享软链竞争）
+if [ -n "${FXCORR_BENCH_INPUT:-}" ]; then CFGIN=$FXCORR_BENCH_INPUT; fi
+if [ -n "${FXCORR_BENCH_OUTDIR:-}" ]; then
+	OUTDIR=$FXCORR_BENCH_OUTDIR
+fi
 
 # ---- ③ 复制 config .input → bench/，sed EXECUTE TIME 截断 + OUTPUT FILENAME ----
 # OUTPUT FILENAME 改指 bench/<exp>.difx：基准 SWIN 与 fxcorr 侧（.input OUTPUT
@@ -264,6 +275,15 @@ for line in open(sys.argv[1]):
         break
 " "$WORKDIR/$CFGIN")
 CALCBASE=$(basename "$CALCIN")
+# 批级并行（FXCORR_BENCH_TAG）：bench/ 下的 input/calc 副本按批唯一，防多批互踩
+BENCH_TAG=${FXCORR_BENCH_TAG:-}
+if [ -n "$BENCH_TAG" ]; then
+	BENCH_IN="$(basename "$CFGIN" .input)-${BENCH_TAG}.input"
+	CALC_OUT="${CALCBASE%.calc}-${BENCH_TAG}.calc"
+else
+	BENCH_IN=$(basename "$CFGIN")
+	CALC_OUT=$CALCBASE
+fi
 # 批级 START 覆盖（FXCORR_BENCH_START_MJD 非空；缺省空 = 原行为）
 SMJD=""
 SSEC=""
@@ -273,13 +293,13 @@ if [ -n "${FXCORR_BENCH_START_MJD:-}" ]; then
 fi
 SEDARGS=(-e "s|^EXECUTE TIME (SEC):[[:space:]]*[0-9]*$|EXECUTE TIME (SEC): $EXEC|" \
     -e "s|^OUTPUT FILENAME:[[:space:]]*.*$|OUTPUT FILENAME:    $OUTDIR|" \
-    -e "s|^CALC FILENAME:[[:space:]]*.*$|CALC FILENAME:      $WORKDIR/bench/$CALCBASE|" \
+    -e "s|^CALC FILENAME:[[:space:]]*.*$|CALC FILENAME:      $WORKDIR/bench/$CALC_OUT|" \
     -e "s|^\(FILE [0-9]*/[0-9]*:[[:space:]]*\)\([^/[:space:]].*\)$|\1$FXCORR_ROOT_RAW/\2|")
 if [ -n "$SMJD" ]; then
 	SEDARGS+=(-e "s|^START MJD:[[:space:]]*.*\$|START MJD:          $SMJD|" \
 	          -e "s|^START SECONDS:[[:space:]]*.*\$|START SECONDS:      $SSEC|")
 fi
-sed "${SEDARGS[@]}" "$WORKDIR/$CFGIN" > "$WORKDIR/bench/$(basename "$CFGIN")"
+sed "${SEDARGS[@]}" "$WORKDIR/$CFGIN" > "$WORKDIR/bench/$BENCH_IN"
 # 捕获组用 `[^/[:space:]]` 而不是 `[^/]`：BRE 的 `[[:space:]]*` 会**回溯**——当值本来是
 # 绝对路径（`/work2/...`）时，`[[:space:]]*` 少匹配一个空格、让 `[^/]` 去吃那个空格，
 # 于是"相对路径才拼 $CFGDIR"的意图失效，拼成 `$CFGDIR/ /work2/...`（中间一个空格），
@@ -290,7 +310,7 @@ sed "${SEDARGS[@]}" "$WORKDIR/$CFGIN" > "$WORKDIR/bench/$(basename "$CFGIN")"
 # 各自的根规则处理，与这里的拼接是两件事。
 sed -e "s|^IM FILENAME:[[:space:]]*\([^/[:space:]].*\)$|IM FILENAME:        $CFGDIR/\1|" \
     -e "s|^FLAG FILENAME:[[:space:]]*\([^/[:space:]].*\)$|FLAG FILENAME:      $CFGDIR/\1|" \
-    "$CFGDIR/$CALCBASE" > "$WORKDIR/bench/$CALCBASE"
+    "$CFGDIR/$CALCBASE" > "$WORKDIR/bench/$CALC_OUT"
 rm -rf "$OUTDIR"    # 幂等重跑
 mkdir -p "$OUTDIR"
 
@@ -302,7 +322,7 @@ mkdir -p "$OUTDIR"
 # 顺序即批序：mpifxcorr 按 FILE 行下标顺序推进读（fileindex >= confignumfiles
 # 才停），所以数组次序必须与时间次序一致。
 if [ "$NBATCH_BENCH" -gt 1 ]; then
-	python3 - "$WORKDIR/bench/$(basename "$CFGIN")" "$BID" "$NBATCH_BENCH" <<'PYEOF'
+	python3 - "$WORKDIR/bench/$BENCH_IN" "$BID" "$NBATCH_BENCH" <<'PYEOF'
 import os, re, sys
 
 path, bid, nbatch = sys.argv[1], sys.argv[2], int(sys.argv[3])
@@ -449,7 +469,7 @@ epoch_mark() {
 epoch_mark mpirun_start
 # FXCORR_MPI_TARGET：mpirun 的目标（缺省 mpifxcorr；route=3 用 rank wrapper
 # 记录各 rank 进程启动时刻——rank 自身有 CPU 份额，不受采样器被 throttle 影响）
-mpirun "${MPIARGS[@]}" -np "${NP:-4}" "${FXCORR_MPI_TARGET:-mpifxcorr}" "bench/$(basename "$CFGIN")"
+mpirun "${MPIARGS[@]}" -np "${NP:-4}" "${FXCORR_MPI_TARGET:-mpifxcorr}" "bench/$BENCH_IN"
 epoch_mark mpirun_end
 
 kill "$SAMPID" 2>/dev/null || true
