@@ -18,6 +18,8 @@
 #               FXCORR_MPI_PPN   每节点 rank 数，节点列表由 Slurm 分配自动展开
 #               FXCORR_MPI_HOSTS 直接给 mpirun 的 -host 串（`a:17,b:17`），绕开自动展开
 #               FXCORR_MPI_MAPBY 给 mpirun 的 --map-by（如 node）
+#               FXCORR_MPI_BIND 给 mpirun 的 --bind-to（rankfile 用 core:overload-allowed）
+#               FXCORR_MPI_OVERSUBSCRIBE=1 单独加 --oversubscribe
 set -euo pipefail
 
 SCRIPTDIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
@@ -411,8 +413,24 @@ if [ -n "${FXCORR_MPI_HOSTS:-}" ]; then
 	MPIARGS+=(-x PATH)
 	MPIARGS+=(-x LD_LIBRARY_PATH)
 fi
+# rankfile（2026-11-06 补）：a-side.sh 的多节点路径 export FXCORR_MPI_RANKFILE
+# （per-host 绑核文件），但本脚本此前只认 FXCORR_MPI_HOSTS——于是 8 节点 A 的
+# mpirun 既没有 -host 也没有 --rankfile，225 个 rank 全挤在登录节点上，实测
+# 2026-11-05 23:02 起卡死 7 小时（p24-a-n8-2.048）。宿主 HPC-X 只认
+# `--rankfile <file>`（Open MPI 4.1.4rc1 拒绝 --map-by rankfile:file=）。
+if [ -n "${FXCORR_MPI_RANKFILE:-}" ]; then
+	MPIARGS+=(--rankfile "$FXCORR_MPI_RANKFILE")
+	MPIARGS+=(-x PATH)
+	MPIARGS+=(-x LD_LIBRARY_PATH)
+fi
 if [ -n "${FXCORR_MPI_MAPBY:-}" ]; then
 	MPIARGS+=(--map-by "$FXCORR_MPI_MAPBY")
+fi
+# rankfile 的 binds 必须单独给 --bind-to；把 :oversubscribe 拼进 --map-by 会让
+# OpenMPI 放弃逐 rank 绑定（2026-10-31 h04r4n17 实测：57 rank 全落到整个 cpuset）。
+# ds/manager 多个 rank 共用一个 I/O 核，故用 core:overload-allowed。
+if [ -n "${FXCORR_MPI_BIND:-}" ]; then
+	MPIARGS+=(--bind-to "$FXCORR_MPI_BIND")
 fi
 
 # --oversubscribe：允许 NP 大于核数。P4 的 4 站配置是**有意**超订的（34 进程 / 30 核，
@@ -420,7 +438,9 @@ fi
 # 核数够时它不改变行为，所以常开。
 # **跨节点时不给**：--oversubscribe 就是 --map-by :OVERSUBSCRIBE，与上面的 -host /
 # --map-by 属于同一类映射指令，同时给会争；跨节点的 slot 数已由 host:slots 写明。
-if [ -z "${FXCORR_MPI_HOSTS:-}${FXCORR_MPI_MAPBY:-}" ]; then
+if [ "${FXCORR_MPI_OVERSUBSCRIBE:-0}" = 1 ]; then
+	MPIARGS+=(--oversubscribe)
+elif [ -z "${FXCORR_MPI_HOSTS:-}${FXCORR_MPI_MAPBY:-}${FXCORR_MPI_RANKFILE:-}" ]; then
 	MPIARGS+=(--oversubscribe)
 fi
 

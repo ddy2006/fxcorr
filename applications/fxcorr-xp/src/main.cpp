@@ -449,14 +449,31 @@ static bool extractJsonString(const string &json, const string &key, string *val
 // ds 组推导（deriveDsGroups / groupOfDs）已移至 fxcorrcommon/configuration.{h,cpp}——
 // fxcorr-f（fengine 按组落盘）与 fxcorr-x（分片）共用同一实现（data-spec 第 8 节）。
 
-// 一条分片记录：74 字节 SWIN 头 + cf32 数据，逐字节搬运。归并 key 用**整数
-// 纳秒**（由 mjd 与秒偏移推算），不用浮点秒——浮点相等比较不可靠（data-spec 5.9）。
+// 一条记录在**整块缓冲区**中的位置与排序键。记录本身不再逐条分配：一个
+// .part 一次读进 PartBuf::data，PartRecord 只记偏移与长度（2026-11-06——
+// 实验级 merge 每批约 3400 条记录、共数百万条，逐条 string 分配是主要开销）。
+// 归并 key 用**整数纳秒**（由 mjd 与秒偏移推算），不用浮点秒——浮点相等比较
+// 不可靠（data-spec 5.9）。
 struct PartRecord
 {
+	size_t off, len;	// 在 PartBuf::data 中的字节位置
 	long long key;
 	int baseline, freqindex, pulsarbin;
 	int autocorr;		// 自相关记录（写盘时排在同周期的基线记录之后）
-	string bytes;
+};
+
+// 一个（或首尾拼接的若干个）.part 的整块内容与逐条索引。data 是文件原样
+// 字节，recs 按读入顺序排列。
+struct PartBuf
+{
+	vector<char> data;
+	vector<PartRecord> recs;
+
+	void clear()
+	{
+		data.clear();		// 只清长度、保留容量：实验级 merge 逐批复用
+		recs.clear();
+	}
 };
 
 // 排序键刻意**不含极化对**，并用 stable_sort：写盘顺序是
@@ -479,9 +496,14 @@ static bool partRecordLess(const PartRecord &a, const PartRecord &b)
 	return a.pulsarbin < b.pulsarbin;
 }
 
-// 读一个 .part 的全部记录。检查 sync word 与记录长度，任何不一致都报错——
-// 分片文件写坏时宁可停下来，也不要写出一份看着正常、实则残缺的 SWIN。
-static bool readPart(const string &path, Configuration &config, vector<PartRecord> *out,
+// 把一个 .part **整块**读入 PartBuf（追加到已有内容之后），扫描校验 sync word
+// 与记录长度，并把每条记录的位置与排序键记进 recs。任何不一致都报错——分片
+// 文件写坏时宁可停下来，也不要写出一份看着正常、实则残缺的 SWIN。
+//
+// 2026-11-06：原实现每条记录做两次 string 分配（assign + resize），实验级
+// merge 数百万条记录就是千万次堆分配；整块读 + 偏移索引把热路径压成一次
+// read 加一遍扫描。
+static bool loadPart(const string &path, Configuration &config, PartBuf *buf,
                      std::ostringstream *err)
 {
 	ifstream in(path.c_str(), ios::binary);
@@ -490,18 +512,37 @@ static bool readPart(const string &path, Configuration &config, vector<PartRecor
 		*err << "cannot open " << path;
 		return false;
 	}
-	long long nrec = 0;
-	while(true)
+	in.seekg(0, ios::end);
+	std::streamoff n = in.tellg();
+	if(n < 0)
 	{
-		char head[74];
-		in.read(head, sizeof(head));
-		if(in.gcount() == 0)
-			break;			// clean EOF
-		if(in.gcount() != (std::streamsize)sizeof(head))
+		*err << "cannot determine the size of " << path;
+		return false;
+	}
+	in.seekg(0);
+	const size_t off0 = buf->data.size();
+	buf->data.resize(off0 + (size_t)n);
+	if(n > 0)
+	{
+		in.read(&buf->data[off0], (std::streamsize)n);
+		if(in.gcount() != (std::streamsize)n)
+		{
+			*err << path << ": read failed (" << (std::streamoff)in.gcount() << " of "
+			     << n << " byte(s))";
+			return false;
+		}
+	}
+	const size_t end = buf->data.size();
+	size_t off = off0;
+	long long nrec = 0;
+	while(off < end)
+	{
+		if(end - off < 74)
 		{
 			*err << path << ": truncated record header after " << nrec << " record(s)";
 			return false;
 		}
+		const char *head = &buf->data[off];
 		unsigned int sync;
 		memcpy(&sync, head, 4);
 		if(sync != Visibility::SYNC_WORD)
@@ -533,18 +574,29 @@ static bool readPart(const string &path, Configuration &config, vector<PartRecor
 			return false;
 		}
 		size_t nbytes = (size_t)(nchan / chansavg) * sizeof(cf32);
-		rec.bytes.assign(head, sizeof(head));
-		rec.bytes.resize(sizeof(head) + nbytes);
-		in.read(&rec.bytes[sizeof(head)], nbytes);
-		if(in.gcount() != (std::streamsize)nbytes)
+		if(end - off - 74 < nbytes)
 		{
 			*err << path << ": truncated data in record " << nrec << " (wanted " << nbytes
-			     << " bytes, got " << in.gcount() << ")";
+			     << " bytes, got " << (end - off - 74) << ")";
 			return false;
 		}
-		out->push_back(rec);
+		rec.off = off;
+		rec.len = 74 + nbytes;
+		buf->recs.push_back(rec);
+		off += rec.len;
 		nrec++;
 	}
+	return true;
+}
+
+// recs 是否已按 partRecordLess 有序。batch 级 merge 用同一比较器排好序才写出
+// merged.part，实验级可以直接按原字节搬运；这里 O(n) 验证一次，万一输入被
+// 外部改动就退回排序，输出与旧版逐字节一致。
+static bool recsAreOrdered(const vector<PartRecord> &recs)
+{
+	for(size_t i = 1; i < recs.size(); i++)
+		if(partRecordLess(recs[i], recs[i - 1]))
+			return false;
 	return true;
 }
 
@@ -555,7 +607,7 @@ static bool readPart(const string &path, Configuration &config, vector<PartRecor
 // 文档约束落成程序内检查，与 mpifxcorr 拒绝覆盖已有 SWIN 的行为一致。
 //
 // 只读 74 字节记录头，数据用 seekg 跳过：对一个 GB 级的 SWIN 也是秒级。
-// 记录长度由 freqindex 查 .input 得到（头里没有 length 字段），与 readPart 同。
+// 记录长度由 freqindex 查 .input 得到（头里没有 length 字段），与 loadPart 同。
 static bool swinHasBatchRange(const string &path, Configuration &config,
                               double batchstartmjd, double durationsec,
                               long long *nrecords)
@@ -765,7 +817,7 @@ static int doMerge(Configuration &config, const string &workdir, const string &b
 	// ① 本 batch 应有几片：ds 组的个数（从 .input 的 baseline 表推导）
 	vector<vector<int> > groups = deriveDsGroups(config, configindex);
 	vector<char> haveshard(groups.size(), 0);
-	vector<PartRecord> records;
+	PartBuf buf;
 	std::ostringstream err;
 
 	for(size_t g = 0; g < groups.size(); g++)
@@ -778,7 +830,7 @@ static int doMerge(Configuration &config, const string &workdir, const string &b
 			continue;			// 缺片，下面统一报
 		probe.close();
 		haveshard[g] = 1;
-		if(!readPart(path, config, &records, &err))
+		if(!loadPart(path, config, &buf, &err))
 			return fail(monitor, "fxcorr-xp merge: " + err.str());
 	}
 
@@ -811,7 +863,7 @@ static int doMerge(Configuration &config, const string &workdir, const string &b
 		     << " of " << groups.size() << " are missing - the frequency bands they cover "
 		        "will have no records in this batch (" << partdir << ")" << endl;
 	}
-	if(records.empty())
+	if(buf.recs.empty())
 	{
 		cerr << "fxcorr-xp merge: no records in " << partdir << ", nothing written" << endl;
 		return EXIT_SUCCESS;
@@ -819,14 +871,14 @@ static int doMerge(Configuration &config, const string &workdir, const string &b
 
 	// ③ 归并：按积分周期排序（同一周期内的顺序不影响 difx2fits 的读取，
 	//    它按记录逐条查 baseline 并对时间做单调检查）
-	stable_sort(records.begin(), records.end(), partRecordLess);
+	stable_sort(buf.recs.begin(), buf.recs.end(), partRecordLess);
 	long long lastkey = -1;
 	long long ntimeback = 0;
-	for(size_t i = 0; i < records.size(); i++)
+	for(size_t i = 0; i < buf.recs.size(); i++)
 	{
-		if(records[i].key < lastkey)
+		if(buf.recs[i].key < lastkey)
 			ntimeback++;
-		lastkey = records[i].key;
+		lastkey = buf.recs[i].key;
 	}
 	if(ntimeback > 0)
 		cerr << "fxcorr-xp merge: WARNING: " << ntimeback
@@ -839,14 +891,14 @@ static int doMerge(Configuration &config, const string &workdir, const string &b
 	ofstream out(outpath.c_str(), ios::trunc|ios::binary);
 	if(!out.is_open())
 		return fail(monitor, string("fxcorr-xp merge: cannot open ") + outpath + " for writing");
-	for(size_t i = 0; i < records.size(); i++)
-		out.write(records[i].bytes.data(), records[i].bytes.size());
+	for(size_t i = 0; i < buf.recs.size(); i++)
+		out.write(buf.data.data() + buf.recs[i].off, buf.recs[i].len);
 	out.close();
 	if(!out)
 		return fail(monitor, string("fxcorr-xp merge: error writing ") + outpath);
 
 	FXLOG(FXLOG_INFO) << "fxcorr-xp merge: batch " << batchid << ", " << groups.size() << " shard(s), "
-	                  << records.size() << " records -> " << outpath << endl;
+	                  << buf.recs.size() << " records -> " << outpath << endl;
 	return EXIT_SUCCESS;
 }
 
@@ -1002,24 +1054,33 @@ static int doMergeExperiment(Configuration &config, const string &workdir,
 	long long total = 0;
 	long long lastkey = -1;
 	long long ntimeback = 0;
+	PartBuf buf;			// 跨批复用容量，避免每批重新分配
 	for(size_t i = 0; i < ordered.size(); i++)
 	{
-		vector<PartRecord> records;
+		buf.clear();
 		ostringstream err;
-		if(!readPart(mergedPartPath(workdir, ordered[i].batch->id), config, &records, &err))
+		if(!loadPart(mergedPartPath(workdir, ordered[i].batch->id), config, &buf, &err))
 			return fail(monitor, "fxcorr-xp merge --experiment: " + err.str());
-		stable_sort(records.begin(), records.end(), partRecordLess);
-		for(size_t k = 0; k < records.size(); k++)
+		// merged.part 由 batch 级 merge 按同一比较器排好序写出，正常路径无需再排；
+		// 只做 O(n) 验证，发现乱序（外部改动 / 旧文件）才退回排序，输出与旧版一致。
+		const bool sorted_input = recsAreOrdered(buf.recs);
+		if(!sorted_input)
+			stable_sort(buf.recs.begin(), buf.recs.end(), partRecordLess);
+		for(size_t k = 0; k < buf.recs.size(); k++)
 		{
-			if(records[k].key < lastkey)
+			if(buf.recs[k].key < lastkey)
 				ntimeback++;
-			lastkey = records[k].key;
-			out.write(records[k].bytes.data(), records[k].bytes.size());
+			lastkey = buf.recs[k].key;
 		}
-		total += (long long)records.size();
+		// 有序时记录在 data 中连续且顺序未变——整块一次写出（2026-11-06）
+		if(sorted_input)
+			out.write(buf.data.data(), buf.data.size());
+		else
+			for(size_t k = 0; k < buf.recs.size(); k++)
+				out.write(buf.data.data() + buf.recs[k].off, buf.recs[k].len);
+		total += (long long)buf.recs.size();
 		FXLOG(FXLOG_VERBOSE) << "fxcorr-xp merge --experiment: batch " << ordered[i].batch->id
-		                     << ", " << records.size() << " record(s)" << endl;
-		vector<PartRecord>().swap(records);
+		                     << ", " << buf.recs.size() << " record(s)" << endl;
 	}
 	out.close();
 	if(!out)

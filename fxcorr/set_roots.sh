@@ -51,14 +51,39 @@ if [ ${#batches[@]} -eq 0 ]; then
 	exit 2
 fi
 
+# 批量写记录（2026-11-05 优化）：原实现对每个批调一次 fxcorr_write_roots，
+# 而每次内部有 5 个 $(...) 命令替换 + cat + mkdir——480 批约 3000+ 次 fork，
+# 实测占 prep 的六成（p419，480 批 / 491.52 s：prep 107 s 里约 66 s 在这里）。
+# 记录内容是**每批完全相同**的（只随四个根变化），所以在这里一次性算好，
+# 循环内只用 printf 内建重定向（零 fork）；basename 也换成参数展开。
+# 内容格式与 fxcorr_write_roots 逐字节一致（同样是 5 字段多行 JSON）。
+rec_wd=$(fxcorr_root_norm "$FXCORR_ROOT_WORKDIR")
+rec_raw=$(fxcorr_root_record "$FXCORR_ROOT_RAW" raw)
+rec_fengine=$(fxcorr_root_record "$FXCORR_ROOT_FENGINE" fengine)
+rec_vis=$(fxcorr_root_record "$FXCORR_ROOT_VIS" vis)
+rec_product=$(fxcorr_root_record "$FXCORR_ROOT_PRODUCT" product)
+
+rootsdir="$WORKDIR/meta/roots"
+mkdir -p "$rootsdir" || { echo "set_roots.sh: cannot create ${rootsdir}" >&2; exit 2; }
+
+template='{
+  "workdir": "%s",
+  "raw": "%s",
+  "fengine": "%s",
+  "vis": "%s",
+  "product": "%s"
+}
+'
 for f in "${batches[@]}"; do
-	bid=$(basename "$f" .json)
-	fxcorr_write_roots "$bid" || {
+	bid=${f##*/}
+	bid=${bid%.json}
+	printf "$template" "$rec_wd" "$rec_raw" "$rec_fengine" "$rec_vis" "$rec_product" \
+		> "$rootsdir/$bid.json" || {
 		echo "set_roots.sh: write meta/roots/${bid}.json failed" >&2
 		exit 2
 	}
-	echo "set_roots.sh: wrote meta/roots/${bid}.json"
 done
+echo "set_roots.sh: wrote ${#batches[@]} meta/roots/*.json"
 
 # 打印写出的值供核对（R8：不 export 时静默写回共享布局——这里是唯一的确认点）
 echo "set_roots.sh: workdir=${WORKDIR}"

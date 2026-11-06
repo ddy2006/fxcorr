@@ -1,0 +1,270 @@
+# =========================
+#  Project
+# =========================
+vex = t25362-16st.vex
+
+antennas = BA, S6, BX, SX, BY, SY, BZ, SZ, B1, S1, B2, S2, B3, S3, B4, S4
+singleScan = True
+startSeries = 1
+
+nCore   = 16
+nThread = 4
+
+dataBufferFactor = 32
+maxLength = 86400
+tweakIntTime = true
+
+
+machines = difx,difx,difx,difx,difx,difx,difx,difx,difx,difx,difx,difx,difx,difx,difx,difx,difx,difx,difx,difx,difx,difx,difx,difx,difx,difx,difx,difx,difx,difx,difx,difx,difx,difx,difx,difx,difx,difx,difx,difx,difx,difx,difx,difx,difx,difx,difx,difx,difx,difx,difx,difx,difx,difx,difx,difx,difx,difx,difx,difx,difx,difx,difx,difx,difx,difx,difx,difx,difx,difx,difx,difx,difx,difx,difx,difx,difx,difx,difx,difx,difx,difx,difx,difx,difx,difx,difx,difx,difx,difx,difx,difx,difx,difx,difx,difx,difx,difx,difx,difx,difx,difx,difx,difx,difx,difx,difx,difx,difx,difx,difx,difx,difx,difx,difx,difx,difx,difx,difx,difx,difx,difx,difx,difx,difx,difx,difx,difx
+
+SETUP default
+{
+    nChan = 128
+    tInt  = 1.024
+}
+
+RULE rule1
+{
+  scan  = 362-0650a
+  setup = default
+}
+
+ANTENNA BA
+{
+    datastreams = BA1, BA2, BA3, BA4, BA5, BA6, BA7, BA8
+    phaseCalInt = 5
+}
+
+DATASTREAM BA1 { filelist = data/filelist_ba_t1  format = VDIF/8032/2  sampling = REAL  nBand = 8 }
+DATASTREAM BA2 { filelist = data/filelist_ba_t2  format = VDIF/8032/2  sampling = REAL  nBand = 8 }
+DATASTREAM BA3 { filelist = data/filelist_ba_t3  format = VDIF/8032/2  sampling = REAL  nBand = 8 }
+DATASTREAM BA4 { filelist = data/filelist_ba_t4  format = VDIF/8032/2  sampling = REAL  nBand = 8 }
+DATASTREAM BA5 { filelist = data/filelist_ba_t5  format = VDIF/8032/2  sampling = REAL  nBand = 8 }
+DATASTREAM BA6 { filelist = data/filelist_ba_t6  format = VDIF/8032/2  sampling = REAL  nBand = 8 }
+DATASTREAM BA7 { filelist = data/filelist_ba_t7  format = VDIF/8032/2  sampling = REAL  nBand = 8 }
+DATASTREAM BA8 { filelist = data/filelist_ba_t8  format = VDIF/8032/2  sampling = REAL  nBand = 8 }
+
+ANTENNA S6
+{
+    datastreams = S61, S62, S63, S64, S65, S66, S67, S68
+    phaseCalInt = 5
+}
+
+DATASTREAM S61 { filelist = data/filelist_s6_t1  format = VDIF/8032/2  sampling = REAL  nBand = 8 }
+DATASTREAM S62 { filelist = data/filelist_s6_t2  format = VDIF/8032/2  sampling = REAL  nBand = 8 }
+DATASTREAM S63 { filelist = data/filelist_s6_t3  format = VDIF/8032/2  sampling = REAL  nBand = 8 }
+DATASTREAM S64 { filelist = data/filelist_s6_t4  format = VDIF/8032/2  sampling = REAL  nBand = 8 }
+DATASTREAM S65 { filelist = data/filelist_s6_t5  format = VDIF/8032/2  sampling = REAL  nBand = 8 }
+DATASTREAM S66 { filelist = data/filelist_s6_t6  format = VDIF/8032/2  sampling = REAL  nBand = 8 }
+DATASTREAM S67 { filelist = data/filelist_s6_t7  format = VDIF/8032/2  sampling = REAL  nBand = 8 }
+DATASTREAM S68 { filelist = data/filelist_s6_t8  format = VDIF/8032/2  sampling = REAL  nBand = 8 }
+
+ANTENNA BX
+{
+    datastreams = BX1, BX2, BX3, BX4, BX5, BX6, BX7, BX8
+    phaseCalInt = 5
+}
+
+DATASTREAM BX1 { filelist = data/filelist_bx_t1  format = VDIF/8032/2  sampling = REAL  nBand = 8 }
+DATASTREAM BX2 { filelist = data/filelist_bx_t2  format = VDIF/8032/2  sampling = REAL  nBand = 8 }
+DATASTREAM BX3 { filelist = data/filelist_bx_t3  format = VDIF/8032/2  sampling = REAL  nBand = 8 }
+DATASTREAM BX4 { filelist = data/filelist_bx_t4  format = VDIF/8032/2  sampling = REAL  nBand = 8 }
+DATASTREAM BX5 { filelist = data/filelist_bx_t5  format = VDIF/8032/2  sampling = REAL  nBand = 8 }
+DATASTREAM BX6 { filelist = data/filelist_bx_t6  format = VDIF/8032/2  sampling = REAL  nBand = 8 }
+DATASTREAM BX7 { filelist = data/filelist_bx_t7  format = VDIF/8032/2  sampling = REAL  nBand = 8 }
+DATASTREAM BX8 { filelist = data/filelist_bx_t8  format = VDIF/8032/2  sampling = REAL  nBand = 8 }
+
+ANTENNA SX
+{
+    datastreams = SX1, SX2, SX3, SX4, SX5, SX6, SX7, SX8
+    phaseCalInt = 5
+}
+
+DATASTREAM SX1 { filelist = data/filelist_sx_t1  format = VDIF/8032/2  sampling = REAL  nBand = 8 }
+DATASTREAM SX2 { filelist = data/filelist_sx_t2  format = VDIF/8032/2  sampling = REAL  nBand = 8 }
+DATASTREAM SX3 { filelist = data/filelist_sx_t3  format = VDIF/8032/2  sampling = REAL  nBand = 8 }
+DATASTREAM SX4 { filelist = data/filelist_sx_t4  format = VDIF/8032/2  sampling = REAL  nBand = 8 }
+DATASTREAM SX5 { filelist = data/filelist_sx_t5  format = VDIF/8032/2  sampling = REAL  nBand = 8 }
+DATASTREAM SX6 { filelist = data/filelist_sx_t6  format = VDIF/8032/2  sampling = REAL  nBand = 8 }
+DATASTREAM SX7 { filelist = data/filelist_sx_t7  format = VDIF/8032/2  sampling = REAL  nBand = 8 }
+DATASTREAM SX8 { filelist = data/filelist_sx_t8  format = VDIF/8032/2  sampling = REAL  nBand = 8 }
+
+ANTENNA BY
+{
+    datastreams = BY1, BY2, BY3, BY4, BY5, BY6, BY7, BY8
+    phaseCalInt = 5
+}
+
+DATASTREAM BY1 { filelist = data/filelist_by_t1  format = VDIF/8032/2  sampling = REAL  nBand = 8 }
+DATASTREAM BY2 { filelist = data/filelist_by_t2  format = VDIF/8032/2  sampling = REAL  nBand = 8 }
+DATASTREAM BY3 { filelist = data/filelist_by_t3  format = VDIF/8032/2  sampling = REAL  nBand = 8 }
+DATASTREAM BY4 { filelist = data/filelist_by_t4  format = VDIF/8032/2  sampling = REAL  nBand = 8 }
+DATASTREAM BY5 { filelist = data/filelist_by_t5  format = VDIF/8032/2  sampling = REAL  nBand = 8 }
+DATASTREAM BY6 { filelist = data/filelist_by_t6  format = VDIF/8032/2  sampling = REAL  nBand = 8 }
+DATASTREAM BY7 { filelist = data/filelist_by_t7  format = VDIF/8032/2  sampling = REAL  nBand = 8 }
+DATASTREAM BY8 { filelist = data/filelist_by_t8  format = VDIF/8032/2  sampling = REAL  nBand = 8 }
+
+ANTENNA SY
+{
+    datastreams = SY1, SY2, SY3, SY4, SY5, SY6, SY7, SY8
+    phaseCalInt = 5
+}
+
+DATASTREAM SY1 { filelist = data/filelist_sy_t1  format = VDIF/8032/2  sampling = REAL  nBand = 8 }
+DATASTREAM SY2 { filelist = data/filelist_sy_t2  format = VDIF/8032/2  sampling = REAL  nBand = 8 }
+DATASTREAM SY3 { filelist = data/filelist_sy_t3  format = VDIF/8032/2  sampling = REAL  nBand = 8 }
+DATASTREAM SY4 { filelist = data/filelist_sy_t4  format = VDIF/8032/2  sampling = REAL  nBand = 8 }
+DATASTREAM SY5 { filelist = data/filelist_sy_t5  format = VDIF/8032/2  sampling = REAL  nBand = 8 }
+DATASTREAM SY6 { filelist = data/filelist_sy_t6  format = VDIF/8032/2  sampling = REAL  nBand = 8 }
+DATASTREAM SY7 { filelist = data/filelist_sy_t7  format = VDIF/8032/2  sampling = REAL  nBand = 8 }
+DATASTREAM SY8 { filelist = data/filelist_sy_t8  format = VDIF/8032/2  sampling = REAL  nBand = 8 }
+
+ANTENNA BZ
+{
+    datastreams = BZ1, BZ2, BZ3, BZ4, BZ5, BZ6, BZ7, BZ8
+    phaseCalInt = 5
+}
+
+DATASTREAM BZ1 { filelist = data/filelist_bz_t1  format = VDIF/8032/2  sampling = REAL  nBand = 8 }
+DATASTREAM BZ2 { filelist = data/filelist_bz_t2  format = VDIF/8032/2  sampling = REAL  nBand = 8 }
+DATASTREAM BZ3 { filelist = data/filelist_bz_t3  format = VDIF/8032/2  sampling = REAL  nBand = 8 }
+DATASTREAM BZ4 { filelist = data/filelist_bz_t4  format = VDIF/8032/2  sampling = REAL  nBand = 8 }
+DATASTREAM BZ5 { filelist = data/filelist_bz_t5  format = VDIF/8032/2  sampling = REAL  nBand = 8 }
+DATASTREAM BZ6 { filelist = data/filelist_bz_t6  format = VDIF/8032/2  sampling = REAL  nBand = 8 }
+DATASTREAM BZ7 { filelist = data/filelist_bz_t7  format = VDIF/8032/2  sampling = REAL  nBand = 8 }
+DATASTREAM BZ8 { filelist = data/filelist_bz_t8  format = VDIF/8032/2  sampling = REAL  nBand = 8 }
+
+ANTENNA SZ
+{
+    datastreams = SZ1, SZ2, SZ3, SZ4, SZ5, SZ6, SZ7, SZ8
+    phaseCalInt = 5
+}
+
+DATASTREAM SZ1 { filelist = data/filelist_sz_t1  format = VDIF/8032/2  sampling = REAL  nBand = 8 }
+DATASTREAM SZ2 { filelist = data/filelist_sz_t2  format = VDIF/8032/2  sampling = REAL  nBand = 8 }
+DATASTREAM SZ3 { filelist = data/filelist_sz_t3  format = VDIF/8032/2  sampling = REAL  nBand = 8 }
+DATASTREAM SZ4 { filelist = data/filelist_sz_t4  format = VDIF/8032/2  sampling = REAL  nBand = 8 }
+DATASTREAM SZ5 { filelist = data/filelist_sz_t5  format = VDIF/8032/2  sampling = REAL  nBand = 8 }
+DATASTREAM SZ6 { filelist = data/filelist_sz_t6  format = VDIF/8032/2  sampling = REAL  nBand = 8 }
+DATASTREAM SZ7 { filelist = data/filelist_sz_t7  format = VDIF/8032/2  sampling = REAL  nBand = 8 }
+DATASTREAM SZ8 { filelist = data/filelist_sz_t8  format = VDIF/8032/2  sampling = REAL  nBand = 8 }
+
+ANTENNA B1
+{
+    datastreams = B11, B12, B13, B14, B15, B16, B17, B18
+    phaseCalInt = 5
+}
+
+DATASTREAM B11 { filelist = data/filelist_b1_t1  format = VDIF/8032/2  sampling = REAL  nBand = 8 }
+DATASTREAM B12 { filelist = data/filelist_b1_t2  format = VDIF/8032/2  sampling = REAL  nBand = 8 }
+DATASTREAM B13 { filelist = data/filelist_b1_t3  format = VDIF/8032/2  sampling = REAL  nBand = 8 }
+DATASTREAM B14 { filelist = data/filelist_b1_t4  format = VDIF/8032/2  sampling = REAL  nBand = 8 }
+DATASTREAM B15 { filelist = data/filelist_b1_t5  format = VDIF/8032/2  sampling = REAL  nBand = 8 }
+DATASTREAM B16 { filelist = data/filelist_b1_t6  format = VDIF/8032/2  sampling = REAL  nBand = 8 }
+DATASTREAM B17 { filelist = data/filelist_b1_t7  format = VDIF/8032/2  sampling = REAL  nBand = 8 }
+DATASTREAM B18 { filelist = data/filelist_b1_t8  format = VDIF/8032/2  sampling = REAL  nBand = 8 }
+
+ANTENNA S1
+{
+    datastreams = S11, S12, S13, S14, S15, S16, S17, S18
+    phaseCalInt = 5
+}
+
+DATASTREAM S11 { filelist = data/filelist_s1_t1  format = VDIF/8032/2  sampling = REAL  nBand = 8 }
+DATASTREAM S12 { filelist = data/filelist_s1_t2  format = VDIF/8032/2  sampling = REAL  nBand = 8 }
+DATASTREAM S13 { filelist = data/filelist_s1_t3  format = VDIF/8032/2  sampling = REAL  nBand = 8 }
+DATASTREAM S14 { filelist = data/filelist_s1_t4  format = VDIF/8032/2  sampling = REAL  nBand = 8 }
+DATASTREAM S15 { filelist = data/filelist_s1_t5  format = VDIF/8032/2  sampling = REAL  nBand = 8 }
+DATASTREAM S16 { filelist = data/filelist_s1_t6  format = VDIF/8032/2  sampling = REAL  nBand = 8 }
+DATASTREAM S17 { filelist = data/filelist_s1_t7  format = VDIF/8032/2  sampling = REAL  nBand = 8 }
+DATASTREAM S18 { filelist = data/filelist_s1_t8  format = VDIF/8032/2  sampling = REAL  nBand = 8 }
+
+ANTENNA B2
+{
+    datastreams = B21, B22, B23, B24, B25, B26, B27, B28
+    phaseCalInt = 5
+}
+
+DATASTREAM B21 { filelist = data/filelist_b2_t1  format = VDIF/8032/2  sampling = REAL  nBand = 8 }
+DATASTREAM B22 { filelist = data/filelist_b2_t2  format = VDIF/8032/2  sampling = REAL  nBand = 8 }
+DATASTREAM B23 { filelist = data/filelist_b2_t3  format = VDIF/8032/2  sampling = REAL  nBand = 8 }
+DATASTREAM B24 { filelist = data/filelist_b2_t4  format = VDIF/8032/2  sampling = REAL  nBand = 8 }
+DATASTREAM B25 { filelist = data/filelist_b2_t5  format = VDIF/8032/2  sampling = REAL  nBand = 8 }
+DATASTREAM B26 { filelist = data/filelist_b2_t6  format = VDIF/8032/2  sampling = REAL  nBand = 8 }
+DATASTREAM B27 { filelist = data/filelist_b2_t7  format = VDIF/8032/2  sampling = REAL  nBand = 8 }
+DATASTREAM B28 { filelist = data/filelist_b2_t8  format = VDIF/8032/2  sampling = REAL  nBand = 8 }
+
+ANTENNA S2
+{
+    datastreams = S21, S22, S23, S24, S25, S26, S27, S28
+    phaseCalInt = 5
+}
+
+DATASTREAM S21 { filelist = data/filelist_s2_t1  format = VDIF/8032/2  sampling = REAL  nBand = 8 }
+DATASTREAM S22 { filelist = data/filelist_s2_t2  format = VDIF/8032/2  sampling = REAL  nBand = 8 }
+DATASTREAM S23 { filelist = data/filelist_s2_t3  format = VDIF/8032/2  sampling = REAL  nBand = 8 }
+DATASTREAM S24 { filelist = data/filelist_s2_t4  format = VDIF/8032/2  sampling = REAL  nBand = 8 }
+DATASTREAM S25 { filelist = data/filelist_s2_t5  format = VDIF/8032/2  sampling = REAL  nBand = 8 }
+DATASTREAM S26 { filelist = data/filelist_s2_t6  format = VDIF/8032/2  sampling = REAL  nBand = 8 }
+DATASTREAM S27 { filelist = data/filelist_s2_t7  format = VDIF/8032/2  sampling = REAL  nBand = 8 }
+DATASTREAM S28 { filelist = data/filelist_s2_t8  format = VDIF/8032/2  sampling = REAL  nBand = 8 }
+
+ANTENNA B3
+{
+    datastreams = B31, B32, B33, B34, B35, B36, B37, B38
+    phaseCalInt = 5
+}
+
+DATASTREAM B31 { filelist = data/filelist_b3_t1  format = VDIF/8032/2  sampling = REAL  nBand = 8 }
+DATASTREAM B32 { filelist = data/filelist_b3_t2  format = VDIF/8032/2  sampling = REAL  nBand = 8 }
+DATASTREAM B33 { filelist = data/filelist_b3_t3  format = VDIF/8032/2  sampling = REAL  nBand = 8 }
+DATASTREAM B34 { filelist = data/filelist_b3_t4  format = VDIF/8032/2  sampling = REAL  nBand = 8 }
+DATASTREAM B35 { filelist = data/filelist_b3_t5  format = VDIF/8032/2  sampling = REAL  nBand = 8 }
+DATASTREAM B36 { filelist = data/filelist_b3_t6  format = VDIF/8032/2  sampling = REAL  nBand = 8 }
+DATASTREAM B37 { filelist = data/filelist_b3_t7  format = VDIF/8032/2  sampling = REAL  nBand = 8 }
+DATASTREAM B38 { filelist = data/filelist_b3_t8  format = VDIF/8032/2  sampling = REAL  nBand = 8 }
+
+ANTENNA S3
+{
+    datastreams = S31, S32, S33, S34, S35, S36, S37, S38
+    phaseCalInt = 5
+}
+
+DATASTREAM S31 { filelist = data/filelist_s3_t1  format = VDIF/8032/2  sampling = REAL  nBand = 8 }
+DATASTREAM S32 { filelist = data/filelist_s3_t2  format = VDIF/8032/2  sampling = REAL  nBand = 8 }
+DATASTREAM S33 { filelist = data/filelist_s3_t3  format = VDIF/8032/2  sampling = REAL  nBand = 8 }
+DATASTREAM S34 { filelist = data/filelist_s3_t4  format = VDIF/8032/2  sampling = REAL  nBand = 8 }
+DATASTREAM S35 { filelist = data/filelist_s3_t5  format = VDIF/8032/2  sampling = REAL  nBand = 8 }
+DATASTREAM S36 { filelist = data/filelist_s3_t6  format = VDIF/8032/2  sampling = REAL  nBand = 8 }
+DATASTREAM S37 { filelist = data/filelist_s3_t7  format = VDIF/8032/2  sampling = REAL  nBand = 8 }
+DATASTREAM S38 { filelist = data/filelist_s3_t8  format = VDIF/8032/2  sampling = REAL  nBand = 8 }
+
+ANTENNA B4
+{
+    datastreams = B41, B42, B43, B44, B45, B46, B47, B48
+    phaseCalInt = 5
+}
+
+DATASTREAM B41 { filelist = data/filelist_b4_t1  format = VDIF/8032/2  sampling = REAL  nBand = 8 }
+DATASTREAM B42 { filelist = data/filelist_b4_t2  format = VDIF/8032/2  sampling = REAL  nBand = 8 }
+DATASTREAM B43 { filelist = data/filelist_b4_t3  format = VDIF/8032/2  sampling = REAL  nBand = 8 }
+DATASTREAM B44 { filelist = data/filelist_b4_t4  format = VDIF/8032/2  sampling = REAL  nBand = 8 }
+DATASTREAM B45 { filelist = data/filelist_b4_t5  format = VDIF/8032/2  sampling = REAL  nBand = 8 }
+DATASTREAM B46 { filelist = data/filelist_b4_t6  format = VDIF/8032/2  sampling = REAL  nBand = 8 }
+DATASTREAM B47 { filelist = data/filelist_b4_t7  format = VDIF/8032/2  sampling = REAL  nBand = 8 }
+DATASTREAM B48 { filelist = data/filelist_b4_t8  format = VDIF/8032/2  sampling = REAL  nBand = 8 }
+
+ANTENNA S4
+{
+    datastreams = S41, S42, S43, S44, S45, S46, S47, S48
+    phaseCalInt = 5
+}
+
+DATASTREAM S41 { filelist = data/filelist_s4_t1  format = VDIF/8032/2  sampling = REAL  nBand = 8 }
+DATASTREAM S42 { filelist = data/filelist_s4_t2  format = VDIF/8032/2  sampling = REAL  nBand = 8 }
+DATASTREAM S43 { filelist = data/filelist_s4_t3  format = VDIF/8032/2  sampling = REAL  nBand = 8 }
+DATASTREAM S44 { filelist = data/filelist_s4_t4  format = VDIF/8032/2  sampling = REAL  nBand = 8 }
+DATASTREAM S45 { filelist = data/filelist_s4_t5  format = VDIF/8032/2  sampling = REAL  nBand = 8 }
+DATASTREAM S46 { filelist = data/filelist_s4_t6  format = VDIF/8032/2  sampling = REAL  nBand = 8 }
+DATASTREAM S47 { filelist = data/filelist_s4_t7  format = VDIF/8032/2  sampling = REAL  nBand = 8 }
+DATASTREAM S48 { filelist = data/filelist_s4_t8  format = VDIF/8032/2  sampling = REAL  nBand = 8 }

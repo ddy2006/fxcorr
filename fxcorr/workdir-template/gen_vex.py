@@ -44,11 +44,31 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 CFG = os.path.join(HERE, 'config')
 BASE = 't25362-base'
 
-# 新增站：(新站名, 模板站名, [(模板里的词, 新词)])——第一个替换项由模板名自动加
-NEW_STATIONS = [
-	('BX', 'BA', [('BOSSCHA', 'BOSSCHA2')]),
-	('SX', 'S6', [('SESHAN13', 'SESHAN2')]),
-]
+# 站池：(新站名, 模板站名, 模板 site/antenna 名, 新 site/antenna 名)。
+# 第 1、2 条是 4 站变体的既有派生站；其余按需取前 N-2 条生成任意站数
+# （上限 18 = BA/S6 + 各 8 个派生站）。站坐标与频段照抄模板站。
+def build_station_pool():
+	pool = []
+	b_names = ['BX', 'BY', 'BZ', 'B1', 'B2', 'B3', 'B4', 'B5']
+	s_names = ['SX', 'SY', 'SZ', 'S1', 'S2', 'S3', 'S4', 'S5']
+	for i in range(16):
+		if i % 2 == 0:
+			pool.append((b_names[i // 2], 'BA', 'BOSSCHA', 'BOSSCHA%d' % (i // 2 + 2)))
+		else:
+			pool.append((s_names[i // 2], 'S6', 'SESHAN13', 'SESHAN%d' % (i // 2 + 2)))
+	return pool
+
+
+STATION_POOL = build_station_pool()
+
+
+def select_stations(nstations):
+	"""取 nstations 个站（含模板 BA/S6），返回派生站列表（不含模板站）。"""
+	extra = nstations - 2
+	if extra < 0 or extra > len(STATION_POOL):
+		raise SystemExit('gen_vex.py: --stations 支持 2..%d' % (len(STATION_POOL) + 2))
+	return STATION_POOL[:extra]
+
 
 MINI_BASE_MHZ = 2936.40		# mini 变体的最低频点（= base 的最低频点）
 MINI_STEP_MHZ = 32.0		# = 通道带宽，排满即无间隙
@@ -59,24 +79,6 @@ MINI_STEP_MHZ = 32.0		# = 通道带宽，排满即无间隙
 # raw 根下建软链（.input 的 DATA TABLE 直接抄 filelist 的路径，见其软链段）。
 FILELIST_START_MJD = 61037.28484954
 FILELIST_STOP_MJD = 61037.28498843		# = start + 12 s / 86400
-
-# 除 $STATION/$MODE 外，还要逐站克隆的段：段名 -> [(模板 def, 新 def, 额外替换)]
-# $SITE 的额外替换把 site_ID 一并改名（BA/BX），$DAS 与 $CLOCK 的 def 名就是站名
-CLONE_DEFS = [
-	('SITE',    [('BOSSCHA',   'BOSSCHA2',  [('BA', 'BX')]),
-	             ('SESHAN13',  'SESHAN2',   [('S6', 'SX')])]),
-	('ANTENNA', [('BOSSCHA',   'BOSSCHA2',  []),
-	             ('SESHAN13',  'SESHAN2',   [])]),
-	('DAS',     [('BA',        'BX',        []),
-	             ('S6',        'SX',        [])]),
-	('CLOCK',   [('BA',        'BX',        []),
-	             ('S6',        'SX',        [])]),
-]
-
-VARIANTS = [
-	('t25362-4st', False),
-	('t25362-4st-mini', True),
-]
 
 
 # ---- 通用文本工具 ----
@@ -129,38 +131,38 @@ def clone_def(lines, tmpl, new, extra=()):
 
 # ---- vex 变换 ----
 
-def expand_station(body):
+def expand_station(body, stations):
 	out = list(body)
-	for new, tmpl, extra in NEW_STATIONS:
-		clone_def(out, tmpl, new, extra)
+	for new, tmpl, tmpl_site, new_site in stations:
+		clone_def(out, tmpl, new, [(tmpl_site, new_site)])
 	return out
 
 
-def expand_mode(body):
+def expand_mode(body, stations):
 	out = []
 	for ln in body:
 		# 三条"一次列举全部站"的行：在收尾分号前补上新站
 		if re.match(r'^\s*ref \$(PASS_ORDER|ROLL|PHASE_CAL_DETECT)\s*=', ln):
-			names = ' : '.join(n[0] for n in NEW_STATIONS)
+			names = ' : '.join(n[0] for n in stations)
 			out.append(ln.replace(';', ' : ' + names + ' ;', 1))
 			continue
 		out.append(ln)
 		# 逐站的行：模板站后面补上对应的新站行
 		m = re.match(r'^(\s*ref \$\w+\s*=[^:]*:\s*)([A-Za-z][A-Za-z0-9]*)(\s*;)\s*$', ln)
 		if m:
-			for new, tmpl, _ in NEW_STATIONS:
+			for new, tmpl, _, _ in stations:
 				if tmpl == m.group(2):
 					out.append(m.group(1) + new + m.group(3))
 	return out
 
 
-def expand_sched(body):
+def expand_sched(body, stations):
 	out = []
 	for ln in body:
 		out.append(ln)
 		m = re.match(r'^(\s*station\s*=\s*)([A-Za-z][A-Za-z0-9]*)(\s*:.*)$', ln)
 		if m:
-			for new, tmpl, _ in NEW_STATIONS:
+			for new, tmpl, _, _ in stations:
 				if tmpl == m.group(2):
 					out.append(m.group(1) + new + m.group(3))
 	return out
@@ -185,32 +187,37 @@ def compress_span(body, uniq):
 	return out
 
 
-def make_vex(mini, expand=True):
-	"""生成 vex 变体。expand=False 保留 base 的 2 站（不克隆新站）——
-	用于 t25362-base-mini（2 站 + mini 跨度）。"""
+def make_vex(mini, stations, expand=True):
+	"""生成 vex 变体。stations = select_stations(n) 的派生站列表；
+	expand=False 保留 base 的 2 站（不克隆新站）——用于 t25362-base-mini。"""
 	text = open(os.path.join(CFG, BASE + '.vex')).read()
 	uniq = []
 	parts = []
 	for name, body in split_sections(text):
 		if name == 'STATION':
 			if expand:
-				body = expand_station(body)
+				body = expand_station(body, stations)
 		elif name == 'MODE':
 			if expand:
-				body = expand_mode(body)
+				body = expand_mode(body, stations)
 		elif name == 'SCHED':
 			if expand:
-				body = expand_sched(body)
+				body = expand_sched(body, stations)
 		elif name == 'FREQ':
 			uniq = chan_freqs(body)
 			if mini:
 				body = compress_span(body, uniq)
 				uniq = chan_freqs(body)
-		else:
-			for secname, clones in CLONE_DEFS:
-				if name == secname:
-					for tmpl, new, extra in clones:
-						clone_def(body, tmpl, new, extra)
+		elif expand:
+			# 逐站克隆 SITE / ANTENNA / DAS / CLOCK：
+			# SITE 的额外替换把 site_ID 一并改名；DAS/CLOCK 的 def 名就是站名。
+			for new, tmpl, tmpl_site, new_site in stations:
+				if name == 'SITE':
+					clone_def(body, tmpl_site, new_site, [(tmpl, new)])
+				elif name == 'ANTENNA':
+					clone_def(body, tmpl_site, new_site)
+				elif name in ('DAS', 'CLOCK'):
+					clone_def(body, tmpl, new)
 		parts.append((name, body))
 	return join_sections(parts), uniq
 
@@ -241,13 +248,13 @@ def rename_v2d(line, tmpl, new):
 	return re.sub(r'(?<=_)%s(?=_)' % re.escape(tmpl.lower()), new.lower(), line)
 
 
-def expand_v2d(text, vexname, nds):
+def expand_v2d(text, vexname, nds, stations):
 	lines = text.split('\n')
 	out = []
 	for ln in lines:
 		m = re.match(r'^antennas\s*=\s*(.*?)\s*$', ln)
 		if m:
-			ln = 'antennas = %s, %s' % (m.group(1), ', '.join(n[0] for n in NEW_STATIONS))
+			ln = 'antennas = %s, %s' % (m.group(1), ', '.join(n[0] for n in stations))
 		m = re.match(r'^vex\s*=\s*.*$', ln)
 		if m:
 			ln = 'vex = %s' % vexname
@@ -258,7 +265,7 @@ def expand_v2d(text, vexname, nds):
 
 	while out and out[-1].strip() == '':
 		out.pop()		# 末尾空行稍后由块自身补，避免堆积
-	for new, tmpl, extra in NEW_STATIONS:
+	for new, tmpl, _, _ in stations:
 		block = [rename_v2d(ln, tmpl, new) for ln in station_v2d_lines(out, tmpl)]
 		out.append('')
 		out.extend(block)
@@ -314,6 +321,13 @@ def main():
 			sys.exit('usage: gen_vex.py --install <workdir> <variant>')
 		install(args[2], args[1])
 		return
+
+	nstations = 4
+	if args and args[0] == '--stations':
+		if len(args) < 2:
+			sys.exit('usage: gen_vex.py [--stations N] [outdir]')
+		nstations = int(args[1])
+		args = args[2:]
 	outdir = args[0] if args else CFG
 	if not os.path.isfile(os.path.join(CFG, BASE + '.vex')):
 		sys.exit('gen_vex.py: %s/%s.vex not found' % (CFG, BASE))
@@ -321,22 +335,25 @@ def main():
 	# v2d 的 machines 行长度 = datastream 总数 = 站数 × 每站 ds 数
 	base_v2d = open(os.path.join(CFG, BASE + '.v2d')).read()
 	nds = len(re.findall(r'^DATASTREAM\s', base_v2d, re.M))
-	nstation = 2 + len(NEW_STATIONS)
-	nds4 = nds // 2 * nstation
-	stations = ['BA', 'S6'] + [n[0] for n in NEW_STATIONS]
+	new_stations = select_stations(nstations)
+	nds_n = nds // 2 * nstations
+	stations = ['BA', 'S6'] + [n[0] for n in new_stations]
 
-	for stem, mini in VARIANTS:
-		vex, uniq = make_vex(mini)
-		v2d = expand_v2d(base_v2d, stem + '.vex', nds4)
+	suffix = '%dst' % nstations
+	variants = [('t25362-%s' % suffix, False),
+	            ('t25362-%s-mini' % suffix, True)]
+	for stem, mini in variants:
+		vex, uniq = make_vex(mini, new_stations)
+		v2d = expand_v2d(base_v2d, stem + '.vex', nds_n, new_stations)
 		open(os.path.join(outdir, stem + '.vex'), 'w').write(vex)
 		open(os.path.join(outdir, stem + '.v2d'), 'w').write(v2d)
 		lo, hi = uniq[0], uniq[-1]
 		print('gen_vex.py: %s  %d stations, %d datastreams, %d unique freqs, '
 		      'span %.1f-%.1f MHz (%.0f MHz)'
-		      % (stem, nstation, nds4, len(uniq), lo, hi, hi - lo))
+		      % (stem, nstations, nds_n, len(uniq), lo, hi, hi - lo))
 
 	# t25362-base-mini：base 的 2 站 + mini 跨度（内存/算力受限节点用）
-	vex, uniq = make_vex(True, expand=False)
+	vex, uniq = make_vex(True, [], expand=False)
 	v2d = re.sub(r'^vex\s*=.*$', 'vex = t25362-base-mini.vex', base_v2d, flags=re.M)
 	open(os.path.join(outdir, 't25362-base-mini.vex'), 'w').write(vex)
 	open(os.path.join(outdir, 't25362-base-mini.v2d'), 'w').write(v2d)
