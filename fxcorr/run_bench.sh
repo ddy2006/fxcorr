@@ -432,6 +432,12 @@ fi
 if [ -n "${FXCORR_MPI_BIND:-}" ]; then
 	MPIARGS+=(--bind-to "$FXCORR_MPI_BIND")
 fi
+# 观测开关（2026-11-06）：打印每个 rank 的**实际**绑定位置，排查 taskset 与
+# rankfile 的覆盖顺序（wrapper 模式下 mpirun 绑的是 wrapper，容器内 mpifxcorr
+# 继承它的掩码，光看配置看不出谁生效）。
+if [ -n "${FXCORR_MPI_REPORT_BINDINGS:-}" ]; then
+	MPIARGS+=(--report-bindings)
+fi
 
 # --oversubscribe：允许 NP 大于核数。P4 的 4 站配置是**有意**超订的（34 进程 / 30 核，
 # v7-plan §11 拿它压边界），不加这个 Open MPI 会以 "not enough slots" 直接拒绝启动。
