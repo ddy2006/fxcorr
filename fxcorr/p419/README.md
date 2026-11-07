@@ -24,12 +24,17 @@
 export W=/work2/cstu0036/mydata/fxcorr/workdir-b1024ms
 
 # 4 节点，每节点 24 core rank
+A_MAX_RANK_PER_NODE=57 \
 NODES="h04r1n07 h04r2n05 h03r3n11 h03r3n07" \
   bash p419/a-side.sh 96 1 240 tag-n4
 
 # 结果
 grep "^tag-n4," /work2/cstu0036/mydata/fxcorr/a-logs/a-side.csv
 ```
+
+> **`A_MAX_RANK_PER_NODE=57` 必须给**。脚本默认值是 30（旧口径的单节点保护），
+> 而 28 核预算下每节点实际 rank 数远超它：单节点 57、2 节点 41、4 节点 33、
+> 8 节点 29。不给会被前置检查直接拒绝（`rc=2`）。
 
 （脚本默认 `REPO=/public/home/cstu0030/fxcorr/fxcorr`，即 `run_bench.sh` 所在目录。
 本目录需部署到该位置，或改 `a-side.sh` 里的 `REPO`。）

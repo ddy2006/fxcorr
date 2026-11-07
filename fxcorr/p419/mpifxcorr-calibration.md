@@ -596,6 +596,23 @@ wait
 |---:|---|---:|---:|---:|
 | 4 | 1.024×240 | **1354.6** | 1340.2 | +1.1% |
 | 4 | 0.512×480 | **1377.5** | 1338.2 | +2.9% |
+| 1 | 1.024×60（宿主路径） | **1330.1** | 1339.7 | −0.7% |
+| 1 | 2.048×30 | **1330.4** | —（新档） | — |
+| 1 | 4.096×15 | **1329.9** | —（新档） | — |
+
+**批长无关性的最强证据**（单节点同一台 h03r4n01，数据量都是 61.44 s）：
+
+| 批长 | 批数 | wall |
+|---|---:|---:|
+| 1.024 | 60 | 1330.1 |
+| 2.048 | 30 | 1330.4 |
+| 4.096 | 15 | **1329.9** |
+
+批长跨 **4 倍**，wall 差 **0.04%**。
+
+> 注：1.024 这一轮用 `A_MPI_LAUNCH=host` 走宿主 rankfile 路径（容器内 mpirun
+> 在当前 `run_bench.sh` 下会因 `--map-by rankfile` 与 `--oversubscribe` 冲突而
+> 拒绝启动，见 §10.4）。2.048 / 4.096 同样走宿主路径。
 
 ### 8.2 三条规律
 
@@ -701,7 +718,28 @@ export FXCORR_MPI_EXTRA="--mca mpi_yield_when_idle 1 ${A_MPI_EXTRA:-}"
 raw 3.9 TB > 8 节点内存 984 GB。这一点曾被当作"历史快是因为缓存"的嫌疑，
 `du` 实测后排除。
 
-### 10.4 启动阶段的 `nice` 告警
+### 10.4 单节点的容器内路径不可用（2026-11-07 发现）
+
+**现象**：`NODES=<一台>` 走默认的容器内 mpirun 路径时，mpirun 直接拒绝：
+
+```
+The rankfile that was used claimed that a host was either not
+allocated or oversubscribed its slots.  Host: h03r4n01
+```
+
+**原因**：单节点的 32 个 ds rank 全部绑到 4 个 I/O 核（8:1）。`a-side.sh` 给的是
+`FXCORR_MPI_MAPBY=rankfile:file=/tmp/rf` + `FXCORR_MPI_OVERSUBSCRIBE=1`，但
+`--oversubscribe` 本身就是一条映射指令（等价 `--map-by :OVERSUBSCRIBE`），
+与 `--map-by rankfile` 同时给会互相抵消，Open MPI 仍按 slot 不足处理。
+
+**规避**：单节点加 `A_MPI_LAUNCH=host`，走宿主 mpirun + `--rankfile` +
+`--bind-to core:overload-allowed`。这条路已实测可用（1330.1 s，与容器内路径的
+历史值 1339.7 差 0.7%）。
+
+**待修**：`a-side.sh` 的单节点分支应直接改用 `--rankfile`，不要用
+`--map-by rankfile` + `--oversubscribe` 的组合。
+
+### 10.5 启动阶段的 `nice` 告警
 
 日志开头有：
 

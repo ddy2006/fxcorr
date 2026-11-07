@@ -1,0 +1,29 @@
+{
+  "wall_s": 119.837,
+  "user_s": 117.296,
+  "sys_s": 1.971,
+  "host_wall_s": 120.663,
+  "mem_peak_bytes": 821092352,
+  "mem_peak_mib": 783.1,
+  "mem_peak_source": "ru_maxrss (RUSAGE_CHILDREN)",
+  "mem_cgroup_peak_mib": 791.3,
+  "swin": {
+    "files": 1,
+    "bytes": 281088,
+    "md5": [
+      "82eb2c23e93d4a843e5e719cea87b231"
+    ]
+  },
+  "stages_s": {
+    "station": 111.112622,
+    "read": 0.955006,
+    "zero": 0.008428,
+    "xmac": 6.123372,
+    "wacc": 0.752186,
+    "uvshift": 0.005992,
+    "cbw": 0.000472,
+    "auto": 0.015953,
+    "addsub": 0.011742
+  },
+  "rc": 0
+}

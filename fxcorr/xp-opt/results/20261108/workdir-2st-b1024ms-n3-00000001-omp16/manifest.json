@@ -1,0 +1,23 @@
+{
+  "utc": "2026-11-07T23:45:42Z",
+  "run_id": "workdir-2st-b1024ms-n3-00000001-omp16",
+  "formal": true,
+  "dataset": "workdir-2st-b1024ms-n3",
+  "workdir": "/data/scalebox/mydata/fxcorr/xp-opt/workdir/workdir-2st-b1024ms-n3",
+  "batch": "00000001",
+  "batch_sec": 1.024,
+  "stations": [
+    "BA",
+    "S6"
+  ],
+  "n_stations": 2,
+  "omp": 16,
+  "ds_group": "full",
+  "image": "fxcorr/fxcorr:latest",
+  "image_id": "sha256:48c0d542f2614cf1f8eafd84677cc1f97a02becd952682ecef01e3166742066d",
+  "host": "gjnode5",
+  "nproc": 384,
+  "mem_gib": 754,
+  "git_commit": "unknown",
+  "script_sha256": "7bd0e94a186b86217a8b93dcbabdeb9a8eb9d1bce1ca997381b0f48127582308"
+}
