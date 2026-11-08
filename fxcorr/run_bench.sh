@@ -22,6 +22,11 @@
 #               FXCORR_MPI_OVERSUBSCRIBE=1 单独加 --oversubscribe
 set -euo pipefail
 
+# 脚本版本（2026-11-08）：a-side.sh 会读这一行做一致性校验。远端 3116977c 与
+# 本地 b62a9cc7 曾各自漂移——一端读 FXCORR_MPI_EXTRA、另一端不读，参数被静默
+# 丢弃，直到 A 的 wall 翻 2.1× 才被发现。改本脚本的行为时同步改这里的标记。
+RUN_BENCH_REV=20261107-yield
+
 SCRIPTDIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 # 目录根解析（V5 P5）：mpifxcorr 不认这些根，但基准的 .input 副本里要把
 # 相对路径绝对化，得知道 raw 根在哪
@@ -438,6 +443,14 @@ fi
 if [ -n "${FXCORR_MPI_REPORT_BINDINGS:-}" ]; then
 	MPIARGS+=(--report-bindings)
 fi
+# 额外 MCA 参数（2026-11-07，远端先有、本地 2026-11-08 补齐）：a-side.sh 的
+# 宿主路径 export FXCORR_MPI_EXTRA，内含 "--mca mpi_yield_when_idle 1"。本脚本
+# 此前不读，参数被静默丢弃——2026-11-06 起 A 侧 wall 翻 2.1× 就是这条。
+# 空格分隔，有意不过 shellcheck 的 SC2206。
+if [ -n "${FXCORR_MPI_EXTRA:-}" ]; then
+	# shellcheck disable=SC2206
+	MPIARGS+=(${FXCORR_MPI_EXTRA})
+fi
 
 # --oversubscribe：允许 NP 大于核数。P4 的 4 站配置是**有意**超订的（34 进程 / 30 核，
 # v7-plan §11 拿它压边界），不加这个 Open MPI 会以 "not enough slots" 直接拒绝启动。
@@ -467,7 +480,7 @@ rm -rf "$SAMPLEDIR"; mkdir -p "$SAMPLEDIR"
 # `|| true`（2026-10-14）：正常路径第 323 行已 kill 过采样器，到这里它多半已死，
 # 裸 kill 的"no such process"返回 1，而 set -e 在 EXIT trap 里会把它带成脚本退出码
 # （并中止 trap 剩余部分、跳过下面的 rm -rf）——实测"脚本跑完却恒返回 1"的根因。
-trap 'rm -f "${OUT:-}"; if [ -n "${SAMPID:-}" ]; then kill "$SAMPID" 2>/dev/null || true; fi; rm -rf "${SAMPLEDIR:-}"' EXIT
+trap 'rm -f "${OUT:-}"; if [ -n "${SAMPID:-}" ]; then kill "$SAMPID" 2>/dev/null || true; fi; if [ -n "${ARGCHECK_PID:-}" ]; then kill "$ARGCHECK_PID" 2>/dev/null || true; fi; rm -rf "${SAMPLEDIR:-}"' EXIT
 NNODES=${SLURM_JOB_NUM_NODES:-1}
 if [ "$NNODES" -gt 1 ] && command -v srun >/dev/null 2>&1; then
 	srun --nodes="$NNODES" --ntasks-per-node=1 --overlap \
@@ -492,11 +505,92 @@ epoch_mark() {
 	local t=${2:-$(date +%s.%N)}
 	printf '%s,%s\n' "$1" "$t" >> "$FXCORR_BENCH_EPOCH_FILE" 2>/dev/null || true
 }
+# ---- 命令行落盘 + 运行时参数校验（2026-11-08）----
+# 参数经 a-side.sh → 环境变量 → 本脚本 → MPIARGS 三层传递，任何一层漏读都会
+# 造成"配置看起来对、命令行里没有"（2026-11-06 的 P1 事故）。这里补两道硬约束：
+#   ① 最终命令行写成可重放脚本（FXCORR_BENCH_CMDLOG）
+#   ② mpirun 起来 3 s 后读 /proc/<pid>/cmdline，按 FXCORR_BENCH_EXPECT_ARGS
+#      逐项核对；缺项直接 kill，FXCORR_BENCH_METRICS 里记 mpirun_args_ok=0
+# 两者都由 a-side.sh 设置；未设置时本段零行为——其他调用方（make_testdata、
+# route=3 模块、run-a.sh）不传 yield/rankfile，不能被误判。
+ARGCHECK_PID=
+METRICS=${FXCORR_BENCH_METRICS:-}
+if [ -n "${FXCORR_BENCH_CMDLOG:-}" ]; then
+	{
+		echo '#!/usr/bin/env bash'
+		echo "# 由 run_bench.sh 生成（rev $RUN_BENCH_REV）；cwd 须在 workdir 内"
+		printf 'mpirun'
+		# 空数组必须跳过：printf ' %q' 无参数时会吐出一个 ''，重放就成了命令名
+		if [ "${#MPIARGS[@]}" -gt 0 ]; then printf ' %q' "${MPIARGS[@]}"; fi
+		printf ' -np %q' "${NP:-4}"
+		printf ' %q' "${FXCORR_MPI_TARGET:-mpifxcorr}"
+		printf ' %q\n' "bench/$BENCH_IN"
+	} > "$FXCORR_BENCH_CMDLOG"
+	chmod +x "$FXCORR_BENCH_CMDLOG" 2>/dev/null || true
+fi
+if [ -n "${FXCORR_BENCH_EXPECT_ARGS:-}" ]; then
+	if [ -n "$METRICS" ]; then : > "$METRICS"; fi
+	(
+		sleep 3
+		ok=1 seen=0 missing=
+		# 只看本脚本的直接子进程：宿主路径下 mpirun 是子进程，容器内路径下也
+		# 一样（run_bench.sh 本身就在容器里）。PPid 从 /proc/<pid>/status 取，
+		# 不用 stat 的第 4 字段——comm 含空格或括号时字段会错位。
+		# 先按 cmdline 过滤，再读 status：/proc 有几百个进程，反序会把几百次
+		# 子进程 fork 塞进 3 s 窗口。
+		for d in /proc/[0-9]*; do
+			# 进程可能在扫描途中退出，重定向会报"没有那个文件或目录"
+			[ -r "$d/cmdline" ] || continue
+			cmd=$(tr '\0' ' ' < "$d/cmdline" 2>/dev/null) || continue
+			case "$cmd" in
+				*mpirun*|*orterun*) ;;
+				*) continue ;;
+			esac
+			ppid=$(sed -n 's/^PPid:[[:space:]]*//p' "$d/status" 2>/dev/null | head -1)
+			[ "${ppid:-}" = "$$" ] || continue
+			seen=1
+			for need in $FXCORR_BENCH_EXPECT_ARGS; do
+				case "$cmd" in
+					*"$need"*) ;;
+					*) missing="$missing $need" ;;
+				esac
+			done
+		done
+		if [ "$seen" = 0 ]; then
+			ok=0
+			echo "run_bench.sh: ! 参数校验未判定（mpirun 启动 3 s 后仍未见子进程）" >&2
+		elif [ -n "$missing" ]; then
+			ok=0
+			echo "run_bench.sh: ! 实际 mpirun 命令行缺:$missing —— 参数未生效，kill" >&2
+			for d in /proc/[0-9]*; do
+				[ -r "$d/cmdline" ] || continue
+				cmd=$(tr '\0' ' ' < "$d/cmdline" 2>/dev/null) || continue
+				case "$cmd" in
+					*mpirun*|*orterun*) ;;
+					*) continue ;;
+				esac
+				ppid=$(sed -n 's/^PPid:[[:space:]]*//p' "$d/status" 2>/dev/null | head -1)
+				[ "${ppid:-}" = "$$" ] || continue
+				kill -TERM "${d#/proc/}" 2>/dev/null || true
+			done
+		else
+			echo "run_bench.sh: mpirun 命令行校验通过（$FXCORR_BENCH_EXPECT_ARGS）" >&2
+		fi
+		if [ -n "$METRICS" ]; then echo "mpirun_args_ok=$ok" >> "$METRICS"; fi
+	) &
+	ARGCHECK_PID=$!
+fi
 epoch_mark mpirun_start
 # FXCORR_MPI_TARGET：mpirun 的目标（缺省 mpifxcorr；route=3 用 rank wrapper
 # 记录各 rank 进程启动时刻——rank 自身有 CPU 份额，不受采样器被 throttle 影响）
+set +e
 mpirun "${MPIARGS[@]}" -np "${NP:-4}" "${FXCORR_MPI_TARGET:-mpifxcorr}" "bench/$BENCH_IN"
+MPIRUN_RC=$?
+set -e
 epoch_mark mpirun_end
+# 等校验器收尾：正常时它 3 s 就结束；mpirun 提前失败时最多多等 3 s
+if [ -n "$ARGCHECK_PID" ]; then wait "$ARGCHECK_PID" 2>/dev/null || true; fi
+[ "$MPIRUN_RC" -eq 0 ] || exit "$MPIRUN_RC"
 
 kill "$SAMPID" 2>/dev/null || true
 wait "$SAMPID" 2>/dev/null || true
