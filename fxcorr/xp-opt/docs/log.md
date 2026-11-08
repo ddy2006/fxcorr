@@ -95,3 +95,35 @@ cgroup v2 `memory.peak`，它**包含页缓存**（读 `stream.bin` 的缓存）
 
 后续接续：`app-fxcorr/docs/experiments/difx.md` 的固定单元是 S=16、1.024 s、
 3 批；下一步先补该基线，再 profile `station` 内部与 `xmac` 串行段。
+
+## 2026-11-08 xpp 分支与 band 并行
+
+### 1. xpp 架子
+
+- `applications/fxcorr-xpp` = `fxcorr-xp` 逐字复制（仅改名）；`install-difx` 4 处
+  注册、`fxcorr/docker/Dockerfile` COPY 行已加；镜像重建后容器内与 xp 并存。
+- **镜像内 xpp 默认路径与 xp 逐字节一致**：2 站 / 1.024 s / batch 00000001、
+  OMP=8，md5 均 `82eb2c23…`（281,088 B），wall 20.87 s vs 20.91 s。
+
+### 2. band 并行实现
+
+- 落点 `libraries/fxcorrcommon`：`Mode::setBandParallel(n)`（默认关闭，其他工具
+  行为/内存不变），每线程私有 `BandScratch`（旋转/frac/FFT 工作区/FFT plan）。
+  zoom、linear2circular、单 band 数据流自动禁用。
+- `fxcorr-xpp` 用环境变量 `FXCORR_XPP_BAND_THREADS=N` 启用；band 模式下 station
+  的 ds 循环串行、band 循环作为顶层并行（`main.cpp` 已改为 lambda 双分支）。
+- **修复的构建坑**：`fxcorrcommon/configure.ac` 的 `AX_OPENMP` 原先在
+  `AC_LANG(C++)` 之前，只设置 `OPENMP_CFLAGS`，库从未带 `-fopenmp` 编译
+  （`libraries/CLAUDE.md` 有记录）。
+- 并行机制迭代：OpenMP 内层 `parallel for`（每 block 一次）在 GCC libgomp 下
+  嵌套死锁/极慢；外层改 static 仍死锁；最终改为**持久线程池 `BandPool`**
+  （每 Mode 一份 worker），运行时无嵌套 region。
+
+### 3. 验证状态与局限
+
+- 正确性：串行 vs band=8 的完整产物 md5 对比进行中。
+- 性能观察：station 阶段在 process 的 band 循环之外仍有**串行归约**
+  （`addPcalBlock`/ac 归约，`main.cpp:1852` 附近）与每块 setup；band 并行只覆盖
+  process 内部，加速上限受限，首轮甚至可能因同步开销变慢。
+- 后续方向：block 并行（每线程独立 Mode 状态）或归约段并行化；XMAC 展平并行
+  也在待办列表。

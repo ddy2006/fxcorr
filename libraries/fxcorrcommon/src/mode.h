@@ -23,6 +23,12 @@
 #include <iostream>
 #include <fstream>
 #include <cstdlib>
+#include <vector>
+#include <thread>
+#include <mutex>
+#include <condition_variable>
+#include <functional>
+#include <atomic>
 
 using namespace std;
 
@@ -98,6 +104,18 @@ Mode(Configuration * conf, int confindex, int dsindex, int recordedbandchan, int
   * @param subloopindex The "subloop" index to put the output in
   */
   void process(int index, int subloopindex);
+
+ /**
+  * Optional intra-Mode band parallelism (fxcorr-xpp).  With nthreads > 1,
+  * process() spreads the recorded-frequency loop over nthreads threads, each
+  * using a private copy of the per-band scratch buffers.  Each band's
+  * arithmetic is unchanged, so results are bit-identical to the serial path.
+  * Default 0 (off): every other tool keeps the serial code and memory use.
+  * Disabled for zoom configurations (bands can share a parent band).
+  */
+  void setBandParallel(int nthreads);
+  bool bandParallelEnabled() const { return bandthreads > 1; }
+  int bandParallelThreads() const { return bandthreads; }
 
  /**
   * Sets the autocorrelation arrays to contain 0's
@@ -499,6 +517,38 @@ protected:
   cf32 * tmpvec; 
 
 private:
+  ///Per-thread copy of the band-loop scratch buffers (band parallel mode).
+  struct BandScratch
+  {
+    f64 *subphase;
+    f32 *subarg, *subsin, *subcos;
+    f64 *stepphase;
+    f32 *steparg, *stepsin, *stepcos;
+    cf32 *stepcplx;
+    cf32 *complexunpacked, *complexrotator, *fftd;
+    cf32 *fracsamprotatorA, *fracsamprotatorB;
+    f32 *subfracsamparg, *subfracsampsin, *subfracsampcos;
+    f32 *stepfracsamparg, *stepfracsampsin, *stepfracsampcos;
+    cf32 *stepfracsampcplx;
+    cf32 *piecewiserotator, *quadpiecerotator;
+    f64 *subquadphase;
+    f32 *subquadarg, *subquadsin, *subquadcos;
+    f32 *kscratch;
+    cf32 *tmpvec;
+    vecFFTSpecR_f32 *fftspecR;
+    vecFFTSpecC_cf32 *fftspecC;
+    vecDFTSpecR_f32 *dftspecR;
+    vecDFTSpecC_cf32 *dftspecC;
+    u8 *fftbuffer;
+    BandScratch();
+  };
+  int bandthreads;
+  std::vector<BandScratch> bandscratch;
+  struct BandPool;	// persistent worker threads (mode.cpp)
+  BandPool *bandpool;
+  void allocBandScratch(BandScratch &bs);
+  void freeBandScratch(BandScratch &bs);
+
   ///Array containing decorrelation percentages for a given number of bits
   static const float decorrelationpercentage[];
 };

@@ -22,6 +22,12 @@
 #include "alert.h"
 #include "pcal.h"
 
+#ifdef _OPENMP
+#include <omp.h>
+#else
+static inline int omp_get_thread_num(void) { return 0; }
+#endif
+
 //using namespace std;
 const float Mode::TINY = 0.000000001;
 
@@ -30,7 +36,7 @@ pthread_mutex_t FFTinitMutex = PTHREAD_MUTEX_INITIALIZER;
 #endif
 
 Mode::Mode(Configuration * conf, int confindex, int dsindex, int recordedbandchan, int chanstoavg, int bpersend, int gsamples, int nrecordedfreqs, double recordedbw, double * recordedfreqclkoffs, double * recordedfreqclkoffsdelta, double * recordedfreqphaseoffs, double * recordedfreqlooffs, int nrecordedbands, int nzoombands, int nbits, Configuration::datasampling sampling, Configuration::complextype tcomplex, int unpacksamp, bool fbank, bool linear2circular, int fringerotorder, int arraystridelen, bool cacorrs, double bclock)
-  : config(conf), configindex(confindex), datastreamindex(dsindex), recordedbandchannels(recordedbandchan), channelstoaverage(chanstoavg), blockspersend(bpersend), guardsamples(gsamples), fftchannels(recordedbandchan*2), numrecordedfreqs(nrecordedfreqs), numrecordedbands(nrecordedbands), numzoombands(nzoombands), numbits(nbits), unpacksamples(unpacksamp), fringerotationorder(fringerotorder), arraystridelength(arraystridelen), recordedbandwidth(recordedbw), blockclock(bclock), filterbank(fbank), linear2circular(linear2circular), calccrosspolautocorrs(cacorrs), recordedfreqclockoffsets(recordedfreqclkoffs), recordedfreqclockoffsetsdelta(recordedfreqclkoffsdelta), recordedfreqphaseoffset(recordedfreqphaseoffs), recordedfreqlooffsets(recordedfreqlooffs), pcalresults(0), extractor(0)
+  : config(conf), configindex(confindex), datastreamindex(dsindex), recordedbandchannels(recordedbandchan), channelstoaverage(chanstoavg), blockspersend(bpersend), guardsamples(gsamples), fftchannels(recordedbandchan*2), numrecordedfreqs(nrecordedfreqs), numrecordedbands(nrecordedbands), numzoombands(nzoombands), numbits(nbits), unpacksamples(unpacksamp), fringerotationorder(fringerotorder), arraystridelength(arraystridelen), recordedbandwidth(recordedbw), blockclock(bclock), filterbank(fbank), linear2circular(linear2circular), calccrosspolautocorrs(cacorrs), recordedfreqclockoffsets(recordedfreqclkoffs), recordedfreqclockoffsetsdelta(recordedfreqclkoffsdelta), recordedfreqphaseoffset(recordedfreqphaseoffs), recordedfreqlooffsets(recordedfreqlooffs), pcalresults(0), extractor(0), bandthreads(0), bandpool(0)
 {
   // P3: per-block accumulators are opt-in (see mode.h).  Off by default so
   // that mpifxcorr and every serial consumer keep the original code path.
@@ -558,6 +564,12 @@ Mode::~Mode()
   vectorFree(linearunpacked);
   vectorFree(fftbuffer);
 
+  delete bandpool;
+  bandpool = 0;
+  for(size_t t=0;t<bandscratch.size();t++)
+    freeBandScratch(bandscratch[t]);
+  bandscratch.clear();
+
   vectorFree(subfracsamparg);
   vectorFree(subfracsampsin);
   vectorFree(subfracsampcos);
@@ -689,6 +701,231 @@ float Mode::unpack(int sampleoffset, int subloopindex)
 // FMA contraction, every element is rounded exactly as in the -O2 build, and
 // the products stay bit-identical (checked against the OMP=1 reference in
 // fxcorr-f's four-station runs).
+struct Mode::BandPool
+{
+  int nworkers;
+  std::vector<std::thread> workers;
+  std::mutex m;
+  std::condition_variable cv_start, cv_done;
+  unsigned long generation;
+  int ntasks, donecount;
+  std::atomic<int> next;
+  std::function<void(int,int)> fn;
+  bool stop;
+
+  explicit BandPool(int nthreads)
+    : nworkers(nthreads > 1 ? nthreads - 1 : 0), generation(0), ntasks(0),
+      donecount(0), next(0), stop(false)
+  {
+    for(int w=0;w<nworkers;w++)
+      workers.push_back(std::thread(&Mode::BandPool::workerLoop, this, w+1));
+  }
+  ~BandPool()
+  {
+    {
+      std::lock_guard<std::mutex> lk(m);
+      stop = true;
+    }
+    cv_start.notify_all();
+    for(size_t w=0;w<workers.size();w++)
+      workers[w].join();
+  }
+  void workerLoop(int tid)
+  {
+    unsigned long seen = 0;
+    for(;;)
+    {
+      std::function<void(int,int)> f;
+      int n;
+      {
+        std::unique_lock<std::mutex> lk(m);
+        cv_start.wait(lk, [&]{ return stop || generation != seen; });
+        if(stop)
+          return;
+        seen = generation;
+        f = fn;
+        n = ntasks;
+      }
+      for(;;)
+      {
+        int i = next.fetch_add(1);
+        if(i >= n)
+          break;
+        f(i, tid);
+      }
+      {
+        std::lock_guard<std::mutex> lk(m);
+        donecount++;
+        if(donecount >= nworkers)
+          cv_done.notify_one();
+      }
+    }
+  }
+  void run(int n, const std::function<void(int,int)> &f)
+  {
+    {
+      std::lock_guard<std::mutex> lk(m);
+      fn = f;
+      ntasks = n;
+      next = 0;
+      donecount = 0;
+      generation++;
+    }
+    cv_start.notify_all();
+    for(;;)
+    {
+      int i = next.fetch_add(1);
+      if(i >= n)
+        break;
+      f(i, 0);
+    }
+    std::unique_lock<std::mutex> lk(m);
+    cv_done.wait(lk, [&]{ return donecount >= nworkers; });
+  }
+};
+
+Mode::BandScratch::BandScratch()
+  : subphase(0), subarg(0), subsin(0), subcos(0),
+    stepphase(0), steparg(0), stepsin(0), stepcos(0), stepcplx(0),
+    complexunpacked(0), complexrotator(0), fftd(0),
+    fracsamprotatorA(0), fracsamprotatorB(0),
+    subfracsamparg(0), subfracsampsin(0), subfracsampcos(0),
+    stepfracsamparg(0), stepfracsampsin(0), stepfracsampcos(0),
+    stepfracsampcplx(0),
+    piecewiserotator(0), quadpiecerotator(0),
+    subquadphase(0), subquadarg(0), subquadsin(0), subquadcos(0),
+    kscratch(0), tmpvec(0),
+    fftspecR(0), fftspecC(0), dftspecR(0), dftspecC(0), fftbuffer(0)
+{
+}
+
+void Mode::allocBandScratch(BandScratch &bs)
+{
+  int numfrstrides = fftchannels/arraystridelength;
+  int numfracstrides = numfrstrides;
+  if(usecomplex)
+    numfracstrides *= 2;
+
+  bs.subphase  = vectorAlloc_f64(arraystridelength);
+  bs.subarg    = vectorAlloc_f32(arraystridelength);
+  bs.subsin    = vectorAlloc_f32(arraystridelength);
+  bs.subcos    = vectorAlloc_f32(arraystridelength);
+  bs.stepphase = vectorAlloc_f64(numfrstrides);
+  bs.steparg   = vectorAlloc_f32(numfrstrides);
+  bs.stepsin   = vectorAlloc_f32(numfrstrides);
+  bs.stepcos   = vectorAlloc_f32(numfrstrides);
+  bs.stepcplx  = vectorAlloc_cf32(numfrstrides);
+
+  bs.complexunpacked = vectorAlloc_cf32(fftchannels);
+  bs.complexrotator  = vectorAlloc_cf32(fftchannels);
+  bs.fftd            = vectorAlloc_cf32(fftchannels);
+
+  bs.fracsamprotatorA = vectorAlloc_cf32(recordedbandchannels);
+  bs.fracsamprotatorB = vectorAlloc_cf32(recordedbandchannels);
+
+  bs.subfracsamparg   = vectorAlloc_f32(arraystridelength);
+  bs.subfracsampsin   = vectorAlloc_f32(arraystridelength);
+  bs.subfracsampcos   = vectorAlloc_f32(arraystridelength);
+  bs.stepfracsamparg  = vectorAlloc_f32(numfracstrides/2);
+  bs.stepfracsampsin  = vectorAlloc_f32(numfracstrides/2);
+  bs.stepfracsampcos  = vectorAlloc_f32(numfracstrides/2);
+  bs.stepfracsampcplx = vectorAlloc_cf32(numfracstrides/2);
+
+  bs.piecewiserotator = vectorAlloc_cf32(arraystridelength);
+  bs.quadpiecerotator = vectorAlloc_cf32(arraystridelength);
+  bs.subquadphase = vectorAlloc_f64(arraystridelength);
+  bs.subquadarg   = vectorAlloc_f32(arraystridelength);
+  bs.subquadsin   = vectorAlloc_f32(arraystridelength);
+  bs.subquadcos   = vectorAlloc_f32(arraystridelength);
+
+  bs.kscratch = vectorAlloc_f32(recordedbandchannels);
+  bs.tmpvec   = vectorAlloc_cf32(recordedbandchannels);
+
+  // one FFT plan per band thread: the non-IPP build executes a plan whose
+  // input/output buffers are bound at creation, so a plan cannot be shared
+  // between concurrent process() calls (the serial path gets away with it)
+  // the spec kind follows fringerotationorder exactly as the constructor does
+  // (case 0 uses the R->C plan, cases 1/2 the C->C plan); usecomplex only
+  // changes fftchannels, not which plan is used
+  int wbufsize = 0;
+  switch(fringerotationorder)
+  {
+    case 1:
+    case 2:
+      if(isfft)
+        vectorInitFFTC_cf32(&bs.fftspecC, order, flag, vecAlgHintFast, &wbufsize, &bs.fftbuffer);
+      else
+        vectorInitDFTC_cf32(&bs.dftspecC, fftchannels, flag, vecAlgHintFast, &wbufsize, &bs.fftbuffer);
+      break;
+    default:
+      if(isfft)
+        vectorInitFFTR_f32(&bs.fftspecR, order, flag, vecAlgHintFast, &wbufsize, &bs.fftbuffer);
+      else
+        vectorInitDFTR_f32(&bs.dftspecR, fftchannels, flag, vecAlgHintFast, &wbufsize, &bs.fftbuffer);
+      break;
+  }
+}
+
+void Mode::freeBandScratch(BandScratch &bs)
+{
+  if(bs.subphase) vectorFree(bs.subphase);
+  if(bs.subarg) vectorFree(bs.subarg);
+  if(bs.subsin) vectorFree(bs.subsin);
+  if(bs.subcos) vectorFree(bs.subcos);
+  if(bs.stepphase) vectorFree(bs.stepphase);
+  if(bs.steparg) vectorFree(bs.steparg);
+  if(bs.stepsin) vectorFree(bs.stepsin);
+  if(bs.stepcos) vectorFree(bs.stepcos);
+  if(bs.stepcplx) vectorFree(bs.stepcplx);
+  if(bs.complexunpacked) vectorFree(bs.complexunpacked);
+  if(bs.complexrotator) vectorFree(bs.complexrotator);
+  if(bs.fftd) vectorFree(bs.fftd);
+  if(bs.fracsamprotatorA) vectorFree(bs.fracsamprotatorA);
+  if(bs.fracsamprotatorB) vectorFree(bs.fracsamprotatorB);
+  if(bs.subfracsamparg) vectorFree(bs.subfracsamparg);
+  if(bs.subfracsampsin) vectorFree(bs.subfracsampsin);
+  if(bs.subfracsampcos) vectorFree(bs.subfracsampcos);
+  if(bs.stepfracsamparg) vectorFree(bs.stepfracsamparg);
+  if(bs.stepfracsampsin) vectorFree(bs.stepfracsampsin);
+  if(bs.stepfracsampcos) vectorFree(bs.stepfracsampcos);
+  if(bs.stepfracsampcplx) vectorFree(bs.stepfracsampcplx);
+  if(bs.piecewiserotator) vectorFree(bs.piecewiserotator);
+  if(bs.quadpiecerotator) vectorFree(bs.quadpiecerotator);
+  if(bs.subquadphase) vectorFree(bs.subquadphase);
+  if(bs.subquadarg) vectorFree(bs.subquadarg);
+  if(bs.subquadsin) vectorFree(bs.subquadsin);
+  if(bs.subquadcos) vectorFree(bs.subquadcos);
+  if(bs.kscratch) vectorFree(bs.kscratch);
+  if(bs.tmpvec) vectorFree(bs.tmpvec);
+  if(bs.fftspecR) vectorFreeFFTR_f32(bs.fftspecR);
+  if(bs.fftspecC) vectorFreeFFTC_cf32(bs.fftspecC);
+  if(bs.dftspecR) vectorFreeDFTR_f32(bs.dftspecR);
+  if(bs.dftspecC) vectorFreeDFTC_cf32(bs.dftspecC);
+  if(bs.fftbuffer) vectorFree(bs.fftbuffer);
+}
+
+void Mode::setBandParallel(int nthreads)
+{
+  delete bandpool;
+  bandpool = 0;
+  for(size_t t=0;t<bandscratch.size();t++)
+    freeBandScratch(bandscratch[t]);
+  bandscratch.clear();
+  bandthreads = 0;
+
+  // zoom bands can alias a parent recorded band, which would make two loop
+  // iterations write the same fftoutputs; keep those configurations serial.
+  // linear2circular keeps the serial "stop after the pair" semantics too.
+  if(nthreads <= 1 || numrecordedfreqs <= 1 || numzoombands > 0 || linear2circular)
+    return;
+
+  bandthreads = nthreads;
+  bandscratch.resize(nthreads);
+  for(int t=0;t<nthreads;t++)
+    allocBandScratch(bandscratch[t]);
+  bandpool = new BandPool(nthreads);
+}
+
 __attribute__((optimize("O3")))
 void Mode::process(int index, int subloopindex)  //frac sample error is in microseconds
 {
@@ -906,9 +1143,64 @@ void Mode::process(int index, int subloopindex)  //frac sample error is in micro
 
   // Do the main work here
   // Loop over each frequency and to the fringe rotation and FFT of the data
+  //
+  // Optional band parallelism (fxcorr-xpp): with bandthreads > 1 this loop is
+  // distributed over threads; each thread binds the scratch names below to its
+  // own copy (BandScratch).  The serial path binds them to the original
+  // members, so every band's arithmetic is identical either way.
 
-  for(int i=0;i<numrecordedfreqs;i++)
+  const bool bandpar = (bandthreads > 1);
+  // band tasks are independent; the serial form used "break" after the
+  // linear-to-circular pair, so the flag stops the remaining tasks
+  bool l2cdone = false;
+  auto bandBody = [&](int i, int tid)
   {
+    if(l2cdone)
+      return;
+    BandScratch *bs = bandpar ? &bandscratch[tid] : 0;
+    f64 *&subphase = bs ? bs->subphase : this->subphase;
+    f32 *&subarg = bs ? bs->subarg : this->subarg;
+    f32 *&subsin = bs ? bs->subsin : this->subsin;
+    f32 *&subcos = bs ? bs->subcos : this->subcos;
+    f64 *&stepphase = bs ? bs->stepphase : this->stepphase;
+    f32 *&steparg = bs ? bs->steparg : this->steparg;
+    f32 *&stepsin = bs ? bs->stepsin : this->stepsin;
+    f32 *&stepcos = bs ? bs->stepcos : this->stepcos;
+    cf32 *&stepcplx = bs ? bs->stepcplx : this->stepcplx;
+    cf32 *&complexunpacked = bs ? bs->complexunpacked : this->complexunpacked;
+    cf32 *&complexrotator = bs ? bs->complexrotator : this->complexrotator;
+    cf32 *&fftd = bs ? bs->fftd : this->fftd;
+    cf32 *&fracsamprotatorA = bs ? bs->fracsamprotatorA : this->fracsamprotatorA;
+    cf32 *&fracsamprotatorB = bs ? bs->fracsamprotatorB : this->fracsamprotatorB;
+    f32 *&subfracsamparg = bs ? bs->subfracsamparg : this->subfracsamparg;
+    f32 *&subfracsampsin = bs ? bs->subfracsampsin : this->subfracsampsin;
+    f32 *&subfracsampcos = bs ? bs->subfracsampcos : this->subfracsampcos;
+    f32 *&stepfracsamparg = bs ? bs->stepfracsamparg : this->stepfracsamparg;
+    f32 *&stepfracsampsin = bs ? bs->stepfracsampsin : this->stepfracsampsin;
+    f32 *&stepfracsampcos = bs ? bs->stepfracsampcos : this->stepfracsampcos;
+    cf32 *&stepfracsampcplx = bs ? bs->stepfracsampcplx : this->stepfracsampcplx;
+    cf32 *&piecewiserotator = bs ? bs->piecewiserotator : this->piecewiserotator;
+    cf32 *&quadpiecerotator = bs ? bs->quadpiecerotator : this->quadpiecerotator;
+    f64 *&subquadphase = bs ? bs->subquadphase : this->subquadphase;
+    f32 *&subquadarg = bs ? bs->subquadarg : this->subquadarg;
+    f32 *&subquadsin = bs ? bs->subquadsin : this->subquadsin;
+    f32 *&subquadcos = bs ? bs->subquadcos : this->subquadcos;
+    f32 *&kscratch = bs ? bs->kscratch : this->kscratch;
+    cf32 *&tmpvec = bs ? bs->tmpvec : this->tmpvec;
+    u8 *&fftbuffer = bs ? bs->fftbuffer : this->fftbuffer;
+    vecFFTSpecR_f32 *&pFFTSpecR = bs ? bs->fftspecR : this->pFFTSpecR;
+    vecFFTSpecC_cf32 *&pFFTSpecC = bs ? bs->fftspecC : this->pFFTSpecC;
+    vecDFTSpecR_f32 *&pDFTSpecR = bs ? bs->dftspecR : this->pDFTSpecR;
+    vecDFTSpecC_cf32 *&pDFTSpecC = bs ? bs->dftspecC : this->pDFTSpecC;
+
+    // band-local state (the function-scope copies would be shared)
+    int status, count, RcpIndex, LcpIndex;
+    int indices[10];
+    bool looff, isfraclooffset;
+    f32 *currentstepchannelfreqs, *currentsubchannelfreqs;
+    cf32 *fftptr;
+    double phaserotation, lofreq;
+    f32 phaserotationfloat;
     count = 0;
     //updated so that Nyquist channel is not accumulated for either USB or LSB data
     //and is excised entirely, so both USB and LSB data start at the same place (no sidebandoffset)
@@ -1393,7 +1685,9 @@ void Mode::process(int index, int subloopindex)  //frac sample error is in micro
 	  vectorAdd_cf32_I(conjfftoutputs[LcpIndex][subloopindex], conjfftoutputs[RcpIndex][subloopindex], recordedbandchannels);
 	  vectorCopy_cf32(tmpvec, conjfftoutputs[LcpIndex][subloopindex], recordedbandchannels);
 
-	  break; 
+	  // serial form: break; the pool task returns instead
+	  l2cdone = true;
+	  return;
       } else if (phasepoloffset) {
 	// Add phase offset to Lcp
 
@@ -1449,7 +1743,12 @@ void Mode::process(int index, int subloopindex)  //frac sample error is in micro
         }
       }
     }
-  }
+  };
+  if(bandpar && bandpool != 0)
+    bandpool->run(numrecordedfreqs, bandBody);
+  else
+    for(int i=0;i<numrecordedfreqs;i++)
+      bandBody(i, 0);
 }
 
 void Mode::averageFrequency()

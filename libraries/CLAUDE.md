@@ -69,3 +69,11 @@ libraries/<name>/
   修复：成员初始化列表加 `pcalresults(0), extractor(0)`（析构本就用
   `getDPhaseCalIntervalHz > 0` 守卫，构造/析构对称）。回归：`fxcorr/test/gaps/` 七个
   用例（无 pcal 的 test 配置）全 PASS。
+- **OpenMP 检测的语言顺序（2026-11-08，band 并行排查发现）**：`configure.ac` 里
+  `AX_OPENMP` 探测的是**当前语言**的 flag。此前 `AX_OPENMP` 写在 `AC_LANG(C++)`
+  之前，实际检测的是 C 编译器（日志：`checking for OpenMP flag of C compiler`），
+  只设置 `OPENMP_CFLAGS`；`CXXFLAGS` 里的 `${OPENMP_CXXFLAGS}` 为空 →
+  **整个库从未带 `-fopenmp` 编译**，`mode.cpp`/`datamuxer.cpp` 的 `#pragma omp`
+  全部静默失效（实测：镜像内 `libfxcorrcommon.so` 无 `GOMP_parallel` 符号）。
+  修复：把 `AC_LANG(C++)` 移到 `AX_OPENMP` 之前。任何"库内新增并行 pragma
+  但不见加速"的排查先确认这一条。

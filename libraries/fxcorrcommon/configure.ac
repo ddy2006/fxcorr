@@ -28,9 +28,12 @@ AM_INIT_AUTOMAKE([foreign])
 LT_INIT
 
 AC_PROG_CXX
-AX_OPENMP
-
 AC_LANG(C++)
+
+# AX_OPENMP probes the *current* language: switch to C++ first, otherwise it
+# sets OPENMP_CFLAGS while OPENMP_CXXFLAGS stays empty (the library then builds
+# without -fopenmp and every "pragma omp" in it is silently ignored).
+AX_OPENMP
 
 AC_ARG_ENABLE(quiet, [AS_HELP_STRING([--enable-quiet],[disable some verbiage])], [CFLAG_QUIET="-DQUIET"], [CFLAG_QUIET=" "])
 

@@ -113,7 +113,7 @@ COPY --from=builder /usr/local/difx/lib/*.so* /usr/local/difx/lib/
 COPY --from=builder /usr/local/difx/share /usr/local/difx/share
 
 # 串行链路全部命令：前处理 vex2difx/difxcalc、造数 fxcorr-sim、
-# 运行 fxcorr-f/fxcorr-x（v8 链）与 fxcorr-fp/fxcorr-xp（v9 链）、后处理 difx2fits、
+# 运行 fxcorr-f/fxcorr-x（v8 链）与 fxcorr-fp/fxcorr-xp/fxcorr-xpp（v9 链）、后处理 difx2fits、
 # mpifxcorr（MPI 一体化对照，2026-10-14 起；依赖 libmpi 由 runtime 的 openmpi-bin 提供）
 COPY --from=builder /usr/local/difx/bin/vex2difx /usr/local/difx/bin/
 COPY --from=builder /usr/local/difx/bin/difxcalc /usr/local/difx/bin/
@@ -122,6 +122,7 @@ COPY --from=builder /usr/local/difx/bin/fxcorr-f /usr/local/difx/bin/
 COPY --from=builder /usr/local/difx/bin/fxcorr-x /usr/local/difx/bin/
 COPY --from=builder /usr/local/difx/bin/fxcorr-fp /usr/local/difx/bin/
 COPY --from=builder /usr/local/difx/bin/fxcorr-xp /usr/local/difx/bin/
+COPY --from=builder /usr/local/difx/bin/fxcorr-xpp /usr/local/difx/bin/
 COPY --from=builder /usr/local/difx/bin/difx2fits /usr/local/difx/bin/
 
 COPY --from=builder /usr/local/difx/bin/mpifxcorr /usr/local/difx/bin/
