@@ -49,3 +49,8 @@ DiFX 2.9.1 的 clone（分支 fxcorr），正在实施"去 MPI、按 batch 拆�
 - 测试机登录：`ssh fxcoor`
 - 同步文件至测试机：在 fxcorr目录下，运行`make sync`
 - **V7 目标集群（Slurm，另一套机器）**：登录节点 `ssh p419-n1` → 计算节点 `ssh -p 50022 <节点IP>`；源码经 `rsync` 直传（不经 `make sync`），构建与七个实测坑见 `fxcorr/build.md` 的「目标集群构建（V7，Slurm）」节
+
+## 工作纪律
+
+- **不操作 git**：`add` / `commit` / `reset` / `restore` / `push` 等写操作一律不做，除非用户明确要求；只读查询（`status` / `log` / `diff`）可以。暂存区由用户自己管理。
+- **测试命令批量执行**：测试过程中不要一条命令一次往返，把同一阶段的多次操作合并成一批（一个脚本或一次 ssh 会话内连续执行），减少交互次数；长任务一次提交、结束时汇总结果。
