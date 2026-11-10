@@ -21,6 +21,12 @@
 #include <string>
 #include <utility>
 #include <vector>
+#include <thread>
+#include <mutex>
+#include <condition_variable>
+#include <atomic>
+#include <functional>
+#include <chrono>
 
 #include <fxcorrcommon/configuration.h>
 #include <fxcorrcommon/mode.h>
@@ -1096,6 +1102,129 @@ static int doMergeExperiment(Configuration &config, const string &workdir,
 	return EXIT_SUCCESS;
 }
 
+// ---- per-datastream segment pool (ds x block parallelism) ----------------
+// One persistent pool per datastream.  Tasks are contiguous block segments of
+// one fftloop; the calling thread (an OpenMP datastream worker) joins in as
+// worker 0.  The pool is std::thread based, so the ds OpenMP loop and the
+// segment parallelism compose without nesting OpenMP regions (libgomp
+// deadlocks when a parallel loop keeps forking nested teams).  run() returns
+// when every segment is done, which is also the fftloop reduction barrier.
+struct SegmentPool
+{
+	int nworkers;
+	std::vector<std::thread> workers;
+	std::mutex m;
+	std::condition_variable cv_start, cv_done;
+	unsigned long generation;
+	int ntasks, donecount;
+	std::atomic<int> next;
+	std::function<void(int)> fn;
+	bool stop;
+
+	explicit SegmentPool(int nthreads)
+		: nworkers(nthreads > 1 ? nthreads - 1 : 0), generation(0), ntasks(0),
+		  donecount(0), next(0), stop(false)
+	{
+		for(int w=0;w<nworkers;w++)
+			workers.push_back(std::thread(&SegmentPool::workerLoop, this, w+1));
+	}
+	~SegmentPool()
+	{
+		{
+			std::lock_guard<std::mutex> lk(m);
+			stop = true;
+		}
+		cv_start.notify_all();
+		for(size_t w=0;w<workers.size();w++)
+			workers[w].join();
+	}
+	void workerLoop(int)
+	{
+		unsigned long seen = 0;
+		for(;;)
+		{
+			std::function<void(int)> f;
+			int n;
+			{
+				std::unique_lock<std::mutex> lk(m);
+				cv_start.wait(lk, [&]{ return stop || generation != seen; });
+				if(stop)
+					return;
+				seen = generation;
+				f = fn;
+				n = ntasks;
+			}
+			for(;;)
+			{
+				int i = next.fetch_add(1);
+				if(i >= n)
+					break;
+				f(i);
+			}
+			{
+				std::lock_guard<std::mutex> lk(m);
+				donecount++;
+				if(donecount >= nworkers)
+					cv_done.notify_one();
+			}
+		}
+	}
+	void run(int n, const std::function<void(int)> &f)
+	{
+		{
+			std::lock_guard<std::mutex> lk(m);
+			fn = f;
+			ntasks = n;
+			next = 0;
+			donecount = 0;
+			generation++;
+		}
+		cv_start.notify_all();
+		for(;;)
+		{
+			int i = next.fetch_add(1);
+			if(i >= n)
+				break;
+			f(i);
+		}
+		std::unique_lock<std::mutex> lk(m);
+		cv_done.wait(lk, [&]{ return donecount >= nworkers; });
+	}
+};
+
+// compact sense-reversing barrier for one datastream's segment team.  A
+// condition variable costs ~60 ms per fftloop round on this host (measured
+// 2026-11-09), while spin+yield is a few microseconds; the team never exceeds
+// the core count, so the spinning is cheap.
+struct SpinBarrier
+{
+	std::atomic<int> count;
+	std::atomic<unsigned long> gen;
+	int n;
+	explicit SpinBarrier(int nthreads) : count(0), gen(0), n(nthreads) {}
+	void wait()
+	{
+		unsigned long g = gen.load(std::memory_order_acquire);
+		if(count.fetch_add(1, std::memory_order_acq_rel) + 1 == n)
+		{
+			count.store(0, std::memory_order_relaxed);
+			gen.fetch_add(1, std::memory_order_release);
+		}
+		else
+		{
+			// pure spin with PAUSE; sched_yield() is a syscall and turned the
+			// barrier into a sys-time sink (measured 2026-11-09)
+			while(gen.load(std::memory_order_acquire) == g)
+			{
+#if defined(__x86_64__) || defined(__i386__)
+				for(int i=0;i<64;i++)
+					__builtin_ia32_pause();
+#endif
+			}
+		}
+	}
+};
+
 int main(int argc, char **argv)
 {
 	if(argc < 2)
@@ -1520,6 +1649,25 @@ int main(int argc, char **argv)
 	int bandthreads = 0;
 	if(const char *bt = getenv("FXCORR_XPP_BAND_THREADS"))
 		bandthreads = atoi(bt);
+
+	// optional intra-datastream block parallelism (xpp only): N>1 splits each
+	// datastream's fftloop blocks into N contiguous segments, processed by N
+	// replica Modes and reduced in block order (fxcorr-f's P3 scheme).  The
+	// datastreams themselves then run serially; the segment is the task, so a
+	// thread pool is never entered once per block.  Mutually exclusive with
+	// the band switch: the band form was the first experiment and pays a
+	// synchronisation cost per block, so block mode wins when both are set.
+	int blockthreads = 0;
+	if(const char *bt = getenv("FXCORR_XPP_BLOCK_THREADS"))
+		blockthreads = atoi(bt);
+#ifndef _OPENMP
+	blockthreads = 1;	// no team, no segmentation
+#endif
+	if(blockthreads > 1 && bandthreads > 1)
+	{
+		cerr << "fxcorr-xpp: FXCORR_XPP_BLOCK_THREADS and FXCORR_XPP_BAND_THREADS are mutually exclusive; using block parallelism" << endl;
+		bandthreads = 0;
+	}
 #ifdef _OPENMP
 	if(bandthreads > 1)
 		omp_set_max_active_levels(2);
@@ -1527,6 +1675,11 @@ int main(int argc, char **argv)
 
 	int numdatastreams = config.getNumDataStreams();
 	vector<Mode *> modes(numdatastreams, 0);
+	// block-parallel replica Modes per datastream (empty unless
+	// FXCORR_XPP_BLOCK_THREADS > 1); the primary Mode stays worker 0
+	vector<vector<Mode *> > modereplicas(numdatastreams);
+	// one segment pool per datastream (created with its replicas)
+	vector<SegmentPool *> segpools(numdatastreams, 0);
 	vector<StreamReader *> streams(numdatastreams, 0);
 	vector<vector<SpReader *> > readers(numdatastreams);	// MemReader views
 	vector<AcBatchCollector *> accollectors(numdatastreams, 0);
@@ -1574,12 +1727,58 @@ int main(int argc, char **argv)
 		// the per-fftloop reduction below replays the blocks in block order,
 		// so the per-band weights (getDataWeight) and the accumulation
 		// sequences are the values fxcorr-f produced.  slot = the global block
-		// index (blockslotbase = 0), so the whole subint fits.
+		// index (blockslotbase = 0), so the whole subint fits.  The primary
+		// keeps that mapping even in block mode (the serial path must stay
+		// safe if the pcal capability check below falls back).
 		modes[ds]->enableBlockAccumulators(blockspersend);
 		modes[ds]->setBlockSlotBase(0);
+		if(blockthreads > 1)
+		{
+			// the parallel pcal reduction needs the extractors' raw
+			// accumulators; without them the replicas' shares cannot be
+			// folded back in block order (fxcorr-f falls back the same way)
+			if(config.getDPhaseCalIntervalHz(configindex, ds) > 0 && !modes[ds]->blockPcalCapable())
+			{
+				cerr << "fxcorr-xpp: pcal extractor does not expose its raw accumulator; falling back to serial station processing" << endl;
+				blockthreads = 1;
+			}
+			// whole-subint slots: the block form processes the subint without
+			// recycling per-fftloop slots, so every Mode needs blockspersend
+			// slots (zoom bands alias a parent and per-band weights reuse the
+			// slot numbering -- both fall back to the serial path)
+			else if(!modes[ds]->setSubloopCapacity(blockspersend))
+			{
+				cerr << "fxcorr-xpp: cannot hold a whole subint of spectrum slots for datastream " << ds << "; falling back to serial station processing" << endl;
+				blockthreads = 1;
+			}
+		}
+		if(blockthreads > 1)
+		{
+			for(int t=1;t<blockthreads;t++)
+			{
+				Mode *rm = config.getMode(configindex, ds);
+				if(!rm->initialisedOK())
+					return fail(monitor, "fxcorr-xpp: replica mode initialisation failed for station " + station);
+				rm->setDumpKurtosis(dokurtosis);
+				rm->enableBlockAccumulators(blockspersend);
+				rm->setBlockSlotBase(0);
+				if(!rm->setSubloopCapacity(blockspersend))
+				{
+					cerr << "fxcorr-xpp: replica cannot hold a whole subint of spectrum slots; falling back to serial station processing" << endl;
+					delete rm;
+					blockthreads = 1;
+					break;
+				}
+				modereplicas[ds].push_back(rm);
+			}
+			// the pool lives as long as this datastream's Mode stack; the
+			// calling OpenMP thread joins run() as one of the segments
+			if(blockthreads > 1)
+				segpools[ds] = new SegmentPool(blockthreads);
+		}
 		// optional band parallelism; setBandParallel refuses zoom configs
 		// (bands may alias a parent band) and single-band datastreams
-		if(bandthreads > 1)
+		else if(bandthreads > 1)
 			modes[ds]->setBandParallel(bandthreads);
 
 		// one spectrum view per (datastream, total band); zoom bands are the
@@ -1786,19 +1985,167 @@ int main(int argc, char **argv)
 				StreamReader *sr = streams[ds];
 				int nrecordedbands = config.getDNumRecordedBands(configindex, ds);
 
-				// fxcorr-f's per-subint setup, in its main-loop order
-				m->zeroAutocorrelations();
-				m->setValidFlags((s32 *)sr->flags());
-				m->setData((u8 *)sr->data(), (int)sr->validBytes(), sr->scan(),
-				           sr->sec(), sr->ns());
-				m->setOffsets(sr->scan(), sr->offsetSec(), sr->offsetNs());
-				if(pcaltexts[ds] != 0)
-					m->resetpcal();
-				if(dokurtosis)
-					m->zeroKurtosis();	// core.cpp:703-704
+				// fxcorr-f's per-subint setup, in its main-loop order; every
+				// replica sees the same read-only stream record
+				auto setupMode = [&](Mode *sm)
+				{
+					sm->zeroAutocorrelations();
+					sm->setValidFlags((s32 *)sr->flags());
+					sm->setData((u8 *)sr->data(), (int)sr->validBytes(), sr->scan(),
+					            sr->sec(), sr->ns());
+					sm->setOffsets(sr->scan(), sr->offsetSec(), sr->offsetNs());
+					if(pcaltexts[ds] != 0)
+						sm->resetpcal();
+					if(dokurtosis)
+						sm->zeroKurtosis();	// core.cpp:703-704
+				};
+				setupMode(m);
+				for(size_t rt=0;rt<modereplicas[ds].size();rt++)
+					setupMode(modereplicas[ds][rt]);
 
 				int acblockcount = 0;
 				int acshiftcount = 0;
+				if(blockthreads > 1 && maxacblocks >= blockspersend)
+				{
+					// whole-subint block parallelism: each segment processes
+					// one contiguous stretch of this subint's blocks and the
+					// reduction/collection runs once at the end.  The Modes'
+					// slots are global block indices (setSubloopCapacity), so
+					// process(i, i) needs no slot remapping.
+					const int nseg = blockthreads;
+					SegmentPool *pool = segpools[ds];
+					pool->run(nseg, [&](int seg)
+					{
+						Mode *wm = (seg == 0) ? m : modereplicas[ds][seg-1];
+						int bstart = (int)((long long)seg*blockspersend/nseg);
+						int bend = (int)((long long)(seg+1)*blockspersend/nseg);
+						for(int i=bstart;i<bend;i++)
+							wm->process(i, i);
+						// publish this segment's spectra/weights into the
+						// primary's slots (MemReader and the ac collector
+						// only ever look at the primary Mode)
+						if(seg != 0)
+						{
+							for(int i=bstart;i<bend;i++)
+							{
+								for(int j=0;j<nrecordedbands;j++)
+								{
+									int freqindex = config.getDRecordedFreqIndex(configindex, ds, j);
+									int nchan = config.getFNumChannels(freqindex);
+									memcpy(m->getFreqsWrite(j, i), wm->getFreqs(j, i), sizeof(cf32)*nchan);
+									m->setDataWeight(j, i, wm->getDataWeight(j, i));
+								}
+							}
+						}
+					});
+
+					// block-ordered reduction: slot = global block index
+					int crosspols = m->writeCrossAutoCorrs() ? 2 : 1;
+					for(int cp=0;cp<crosspols;cp++)
+					{
+						for(int j=0;j<nrecordedbands;j++)
+						{
+							int freqindex = config.getDRecordedFreqIndex(configindex, ds, j);
+							int nchan = config.getFNumChannels(freqindex);
+							cf32 *dst = m->getAutocorrelation(cp, j);
+							f32 w = m->getWeightReduced(cp, j);
+							for(int seg=0;seg<nseg;seg++)
+							{
+								Mode *rm = (seg == 0) ? m : modereplicas[ds][seg-1];
+								int bstart = (int)((long long)seg*blockspersend/nseg);
+								int bend = (int)((long long)(seg+1)*blockspersend/nseg);
+								for(int i=bstart;i<bend;i++)
+								{
+									const cf32 *src = rm->getBlockAc(cp, i, j);
+									for(int k=0;k<nchan;k++)
+									{
+										dst[k].re += src[k].re;
+										dst[k].im += src[k].im;
+									}
+									w += rm->getBlockWeight(cp, i, j);
+								}
+							}
+							m->setWeightReduced(cp, j, w);
+						}
+					}
+					if(pcaltexts[ds] != 0)
+					{
+						for(int j=0;j<nrecordedbands;j++)
+						{
+							for(int seg=0;seg<nseg;seg++)
+							{
+								Mode *rm = (seg == 0) ? m : modereplicas[ds][seg-1];
+								int bstart = (int)((long long)seg*blockspersend/nseg);
+								int bend = (int)((long long)(seg+1)*blockspersend/nseg);
+								for(int i=bstart;i<bend;i++)
+								{
+									uint64_t samples = 0;
+									const f32 *accum = rm->getBlockPcal(j, i, &samples);
+									m->addPcalBlock(j, accum, samples);
+								}
+							}
+						}
+					}
+					if(dokurtosis)
+					{
+						for(size_t rt=0;rt<modereplicas[ds].size();rt++)
+						{
+							Mode *rm = modereplicas[ds][rt];
+							for(int j=0;j<nrecordedbands;j++)
+							{
+								int freqindex = config.getDRecordedFreqIndex(configindex, ds, j);
+								int nchan = config.getFNumChannels(freqindex);
+								m->addKurtosisProducts(j, rm->getKurtosisProducts1(j),
+								                       rm->getKurtosisProducts2(j), nchan);
+							}
+						}
+					}
+
+					// spectrum views: the slots are global block indices
+					for(int fftloop=0;fftloop<fftloops;fftloop++)
+						for(size_t band=0;band<readers[ds].size();band++)
+							static_cast<MemReader *>(readers[ds][band])->collectBand(fftloop, true);
+
+					// autocorrelation averaging batch (one per subint; the
+					// block form requires maxacblocks >= blockspersend)
+					acblockcount += blockspersend;
+					if(acblockcount == maxacblocks)
+					{
+						if(pcaltexts[ds] != 0)
+							pcaltexts[ds]->accumulateWeight(m);
+						bool datastreamsaveraged = false;
+						if(dosta && config.getMinPostAvFreqChannels(configindex) >= config.getSTADumpChannels())
+						{
+							m->averageFrequency();
+							datastreamsaveraged = true;
+						}
+						if(dosta)
+						{
+							#pragma omp critical(fxcorr_sta)
+							{
+								sendSTA(&monitor, config, configindex, ds, m, scan, scanstartsec,
+								        expectedsec, expectedns,
+								        (acshiftcount*maxacblocks + maxacblocks/2.0)*blockns,
+								        maxacblocks*blockns, datastreamsaveraged, config.getJobName());
+							}
+						}
+						acrecords[ds].push_back(accollectors[ds]->collect(m, datastreamsaveraged));
+						m->zeroAutocorrelations();
+						acblockcount = 0;
+						acshiftcount++;
+					}
+					// the replica's accumulation window is one subint
+					for(size_t rt=0;rt<modereplicas[ds].size();rt++)
+					{
+						Mode *rm = modereplicas[ds][rt];
+						rm->zeroAutocorrelations();
+						if(dokurtosis)
+							rm->zeroKurtosis();
+						if(pcaltexts[ds] != 0)
+							rm->resetpcal();
+					}
+				}
+				else
 				for(int fftloop=0;fftloop<fftloops;fftloop++)
 				{
 					int numffts = blockspersend - fftloop*numbufferedffts;
@@ -1947,6 +2294,8 @@ int main(int argc, char **argv)
 			};
 			if(bandthreads > 1)
 			{
+				// band parallelism owns the whole core budget, so the
+				// datastreams run serially (no nested teams)
 				for(int ds=0;ds<numdatastreams;ds++)
 					stationDs(ds);
 			}
@@ -2100,6 +2449,9 @@ int main(int argc, char **argv)
 				return fail(monitor, "fxcorr-xpp: batch " + batchid + " ends with unflushed pcal tones (batch length is not an intTime multiple)");
 			delete pcaltexts[ds];
 		}
+		delete segpools[ds];
+		for(size_t rt=0;rt<modereplicas[ds].size();rt++)
+			delete modereplicas[ds][rt];
 		delete modes[ds];
 	}
 	vectorFree(subintresults);

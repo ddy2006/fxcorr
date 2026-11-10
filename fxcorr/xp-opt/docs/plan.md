@@ -59,7 +59,13 @@
 ## 当前状态与下一步
 
 - 2026-11-08：2 站 1.024 s 基线完成（OMP 1/8/16），见 `results/` 与 `docs/log.md`；
-- 下一步（待定，按 profile 结果）：
-  1. S=16、1.024 s、3 批的 xp 基线（对齐 app-fxcorr 的固定单元）；
-  2. profile：station 段内部（FFT/unpack/旋转/frac sample）与 xmac 串行段；
-  3. 确定优化版形态（独立二进制 vs 同目录分支）与正确性对拍流程。
+- 2026-11-08：`fxcorr-xpp` 建立，band 并行实测劣化（413 s vs 串行 91.9 s）；
+- 2026-11-10：**方案 A 大粒度版已实现**（槽 = 全局块索引、每 subint 一次归约，
+  `FXCORR_XPP_BLOCK_THREADS`，默认关闭），编译通过；**逐字节验证待完成**。
+  期间发现并修复 `make sync` 用 `rsync -az` 按时间戳跳过、导致远端长期跑旧
+  二进制的事故（改为 `-azc`，旧“逐字节一致”结论作废，见 `docs/log.md`）。
+- 下一步：
+  1. 重建镜像并完成大粒度版的 SWIN / pcal.bin / PCAL 文本逐字节验证，
+     再测 OMP=1/16 × BLOCK=2/4/8；
+  2. S=16、1.024 s、3 批的 xp 基线（对齐 app-fxcorr 的固定单元）；
+  3. profile：station 段内部（FFT/unpack/旋转/frac sample）与 xmac 串行段。

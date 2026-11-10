@@ -206,6 +206,23 @@ Mode(Configuration * conf, int confindex, int dsindex, int recordedbandchan, int
   */
   inline const cf32* getFreqs(int outputband, int subloopindex) const { return fftoutputs[outputband][subloopindex]; };
 
+  /**
+   * Number of buffered spectrum slots (fftoutputs / dataweight rows).
+   * Normally the .input NUM BUFFERED FFTS; the block-parallel form raises it
+   * to blockspersend so a whole subint can be processed without per-fftloop
+   * recycling (see setSubloopCapacity).
+   */
+  inline int subloopCapacity() const { return fftslots; }
+
+  /**
+   * Raises the spectrum slot count to nslots (never lowers it).  Only
+   * supported when the Mode owns every slot (no zoom bands) and the per-band
+   * weights are not in use; returns false otherwise, and the caller must
+   * fall back to the normal buffered path.  The extra slots hold global block
+   * indices, so process(i, i) writes block i to slot i.
+   */
+  bool setSubloopCapacity(int nslots);
+
  /**
   * Returns a pointer to the FFT'd and conjugated data of the specified product
   * @param outputband The band to get
@@ -385,6 +402,7 @@ protected:
   double recordedbandwidth, blockclock, sampletime; //MHz, microseconds
   double a0, b0, c0, a, b, c, quadadd1, quadadd2;
   double fftstartmicrosec, fftdurationmicrosec, intclockseconds;
+  int fftslots;	// spectrum slots; >= NUM BUFFERED FFTS in block mode
   f32 * dataweight;
   f32 ** perbandweights;
   int samplesperblock, samplesperlookup, numlookups, flaglength, autocorrwidth;

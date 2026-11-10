@@ -35,8 +35,12 @@ public:
 	 * weights) into the subint buffer, at the fftloop's global block
 	 * positions.  Must run after the station stage processed the fftloop and
 	 * before the next fftloop overwrites the slots.
+	 *
+	 * globalslots = true for the block-parallel form: the Mode's slots are
+	 * global block indices (subloopCapacity() >= blockspersend), so slot i
+	 * holds block i and fftloop only selects the range to copy.
 	 */
-	void collectBand(int fftloop);
+	void collectBand(int fftloop, bool globalslots = false);
 
 	// ---- SpReader interface ----
 	int numChannels() const { return nchan; }

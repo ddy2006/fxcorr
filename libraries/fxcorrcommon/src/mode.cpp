@@ -77,8 +77,9 @@ Mode::Mode(Configuration * conf, int confindex, int dsindex, int recordedbandcha
   }
 
 
-  dataweight = vectorAlloc_f32(config->getNumBufferedFFTs(confindex));
-  for(int i=0;i<config->getNumBufferedFFTs(confindex);++i)
+  fftslots = config->getNumBufferedFFTs(confindex);
+  dataweight = vectorAlloc_f32(fftslots);
+  for(int i=0;i<fftslots;++i)
   {
     dataweight[i] = 0.0;
   }
@@ -183,9 +184,9 @@ Mode::Mode(Configuration * conf, int confindex, int dsindex, int recordedbandcha
     estimatedbytes += 4*(numrecordedbands + numzoombands);
     for(int j=0;j<numrecordedbands+numzoombands;j++)
     {
-      fftoutputs[j] = new cf32*[config->getNumBufferedFFTs(confindex)];
-      conjfftoutputs[j] = new cf32*[config->getNumBufferedFFTs(confindex)];
-      for(int k=0;k<config->getNumBufferedFFTs(confindex);k++)
+      fftoutputs[j] = new cf32*[fftslots];
+      conjfftoutputs[j] = new cf32*[fftslots];
+      for(int k=0;k<fftslots;k++)
       {
         if(j<numrecordedbands)
         {
@@ -479,7 +480,7 @@ Mode::~Mode()
 {
   if(perbandweights)
   {
-    for(int i=0;i<config->getNumBufferedFFTs(configindex);++i)
+    for(int i=0;i<fftslots;++i)
     {
       delete [] perbandweights[i];
     }
@@ -489,7 +490,7 @@ Mode::~Mode()
   vectorFree(validflags);
   for(int j=0;j<numrecordedbands+numzoombands;j++)
   {
-    for(int k=0;k<config->getNumBufferedFFTs(configindex);k++)
+    for(int k=0;k<fftslots;k++)
     {
       if(j<numrecordedbands) {
         vectorFree(fftoutputs[j][k]);
@@ -1839,6 +1840,55 @@ bool Mode::calculateAndAverageKurtosis(int numblocks, int maxchannels)
 // blockspersend), so the allocation -- and above all its first-touch page
 // faults, which used to cost ~0.5 s per replica at 32000 blocks -- scale with
 // the per-thread work.
+bool Mode::setSubloopCapacity(int nslots)
+{
+  if(nslots <= fftslots)
+    return true;
+  // every slot must be owned by this Mode: zoom slots alias a parent band,
+  // and per-band weights are indexed by the same slot numbers
+  if(numzoombands > 0 || perbandweights != 0)
+    return false;
+
+  for(int j=0;j<numrecordedbands;j++)
+  {
+    cf32 **no = new cf32*[nslots];
+    cf32 **nc = new cf32*[nslots];
+    for(int k=0;k<fftslots;k++)
+    {
+      no[k] = fftoutputs[j][k];
+      nc[k] = conjfftoutputs[j][k];
+    }
+    for(int k=fftslots;k<nslots;k++)
+    {
+      if(fringerotationorder == 0)	// post-F: one extra bin
+      {
+        no[k] = vectorAlloc_cf32(recordedbandchannels+1);
+        nc[k] = vectorAlloc_cf32(recordedbandchannels+1);
+      }
+      else
+      {
+        no[k] = vectorAlloc_cf32(recordedbandchannels);
+        nc[k] = vectorAlloc_cf32(recordedbandchannels);
+      }
+      estimatedbytes += 2*sizeof(cf32)*(recordedbandchannels + (fringerotationorder == 0 ? 1 : 0));
+    }
+    delete [] fftoutputs[j];
+    fftoutputs[j] = no;
+    delete [] conjfftoutputs[j];
+    conjfftoutputs[j] = nc;
+  }
+
+  f32 *ndw = vectorAlloc_f32(nslots);
+  for(int k=0;k<fftslots;k++)
+    ndw[k] = dataweight[k];
+  for(int k=fftslots;k<nslots;k++)
+    ndw[k] = 0.0;
+  vectorFree(dataweight);
+  dataweight = ndw;
+  fftslots = nslots;
+  return true;
+}
+
 void Mode::enableBlockAccumulators(int slotcount)
 {
   if(blockacblocks > 0)

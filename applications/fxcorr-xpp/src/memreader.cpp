@@ -23,11 +23,12 @@ MemReader::~MemReader()
 	delete [] wbuf;
 }
 
-void MemReader::collectBand(int fftloop)
+void MemReader::collectBand(int fftloop, bool globalslots)
 {
 	// same fftloop slicing as fxcorr-f's writeSpectraBand: the batch covers
-	// blocks [fftloop*numbufferedffts, ...+numffts), slot b of the Mode holds
-	// global block fftloop*numbufferedffts+b
+	// blocks [fftloop*numbufferedffts, ...+numffts).  Normally slot b of the
+	// Mode holds global block fftloop*numbufferedffts+b; in block mode the
+	// slots are global block indices, so block i lives in slot i.
 	int numffts = blockspersend - fftloop*numbufferedffts;
 	if(numffts > numbufferedffts)
 		numffts = numbufferedffts;
@@ -35,8 +36,9 @@ void MemReader::collectBand(int fftloop)
 	for(int b=0;b<numffts;b++)
 	{
 		long long i = (long long)fftloop*numbufferedffts + b;
-		const cf32 *spec = mode->getFreqs(band, b);
+		int slot = globalslots ? (int)i : b;
+		const cf32 *spec = mode->getFreqs(band, slot);
 		memcpy(specbuf + i*nchan, spec, sizeof(cf32)*nchan);
-		wbuf[i] = mode->getDataWeight(band, b);
+		wbuf[i] = mode->getDataWeight(band, slot);
 	}
 }

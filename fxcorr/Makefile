@@ -43,6 +43,6 @@ RSYNC_EXCLUDES := \
 	--exclude='*.la'
 
 sync:
-	rsync -az --delete $(RSYNC_EXCLUDES) $(SRC) $(REMOTE)
+	rsync -azc --delete $(RSYNC_EXCLUDES) $(SRC) $(REMOTE)
 
 .PHONY: sync

@@ -11,15 +11,26 @@ band 并行**（`Mode::process` 的 recorded-frequency 循环），默认关闭�
 
 - 程序名 `fxcorr-xpp`；`install-difx` 4 处注册与 `fxcorr/docker/Dockerfile` 的
   COPY 行均已加入，镜像内与 xp 并存。
+- **ds×block 组合并行（可选开关，方案 A，实验性）**：`FXCORR_XPP_BLOCK_THREADS=N`
+  （N>1）时每 ds 构造 N-1 个 Mode 副本；主 Mode 与副本的频谱槽扩到整个 subint
+  （`Mode::setSubloopCapacity`，槽号 = 全局块索引），每 subint 只做一次块段
+  处理与一次按块序归约（pcal 按 band 分担）。ds 由 `OMP_NUM_THREADS` 并行，
+  每 ds 的段任务由自管 `SegmentPool` 执行，不嵌套 OpenMP。要求
+  `maxacblocks >= blockspersend`、无 zoom、pcal 提取器支持原始累加器，否则自动
+  回退串行；默认关闭，与 band 开关互斥。**验证状态（2026-11-10）**：大粒度版
+  已编译，逐字节验证待镜像重建后完成（此前“逐字节一致”的旧结论因远端源码未
+  同步而作废，见 `fxcorr/xp-opt/docs/log.md`），验证前不要用于正式结果。
 - **band 并行（可选开关）**：`FXCORR_XPP_BAND_THREADS=N`（N>1）时，`process()`
   把 recorded-frequency 循环分到 N 个线程，每线程使用私有 scratch
   （`Mode::BandScratch`：FFT 输出工作区、旋转/frac-sample 中间数组、kurtosis
   scratch 等）；每 band 的运算顺序不变，所以 `.part` / SWIN 与 xp **逐字节一致**。
   未设置或 N=1 时走与原 xp 完全相同的串行路径。zoom 配置自动禁用（band 可能
   别名父带，两个迭代会写同一 `fftoutputs`）；单 band 数据流也自动串行。
-- 线程层次：外层 ds 并行（`OMP_NUM_THREADS`）× 内层 band 并行
-  （`FXCORR_XPP_BAND_THREADS`），启用时调用 `omp_set_max_active_levels(2)`。
-  总线程数是两者乘积，需自行控制在物理核预算内（384 逻辑核建议 ≤192）。
+  **实测劣化**：每 block 提交一次任务，2 站 1.024 s 下约十万级提交，wall 413 s
+  vs 串行 91.9 s；保留为对照开关，不作推荐。
+- 线程层次：默认 ds 并行（`OMP_NUM_THREADS`）；band 模式 = ds 串行 × band 内层
+  并行（两层，`omp_set_max_active_levels(2)`）；block 模式 = ds 串行 × 块段
+  并行（单层）。总线程数需自行控制在物理核预算内（384 逻辑核建议 ≤192）。
 - 对照入口：`fxcorr/xp-opt/scripts/run_xp.sh --exe fxcorr-xpp ...`（`run_xp.sh`
   已加 `--exe`，结果字段与 xp 完全一致，可直接对比）。
 
